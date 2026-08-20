@@ -1,0 +1,13 @@
+{
+  "name": "aria-music-bot",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["bot"],
+  "scripts": {
+    "build": "npm --workspace bot run build",
+    "dev": "npm --workspace bot run dev",
+    "start": "npm --workspace bot start",
+    "test": "npm --workspace bot test"
+  },
+  "engines": { "node": ">=20" }
+}
