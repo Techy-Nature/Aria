@@ -3,7 +3,7 @@ import { PlayerManager } from "./player.js";
 import { SearchService } from "./search.js";
 import { SettingsStore } from "./store.js";
 
-const aliases: Record<string, string> = { pre: "prefix", sch: "search", dr: "defresult", pk: "pick", p: "play", enq: "enqueue", l: "loop", tl: "toggleloop", ql: "queuelist", dq: "defqueue", sk: "skip", rew: "rewind", rel: "reload", re: "restart", prv: "previous", s: "stop", str: "stop-remove" };
+const aliases: Record<string, string> = { pre: "prefix", sch: "search", dr: "defresult", pk: "pick", p: "play", enq: "enqueue", l: "loop", tl: "toggleloop", ql: "queuelist", dq: "defqueue", sk: "skip", rew: "rewind", rel: "reload", re: "restart", prv: "previous", ps: "pause", s: "stop", str: "stop-remove" };
 export class CommandRouter {
   private readonly searches = new Map<string, Track[]>();
   constructor(readonly settings: SettingsStore, readonly players: PlayerManager, readonly search: SearchService) {}

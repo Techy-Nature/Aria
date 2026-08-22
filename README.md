@@ -38,9 +38,9 @@ Open <http://localhost:3000>. At the terminal, try `a!play yellow submarine`, `a
 | `previous` | `prv` | Play the previous track. |
 | `stop` | `s` | Stop and leave voice, retaining the queue. |
 | `stop-remove` | `str` | Stop, clear the queue, and leave voice. |
-| `pause` | — | Toggle pause without clearing playback state. |
+| `pause` | `ps` | Toggle pause without clearing playback state. |
 
-`p` is assigned to `play`, so `pause` intentionally has no `p` alias; two commands cannot be selected by the same input. This resolves the collision in the requested command list.
+`p` is assigned to `play`, while `ps` toggles pause so the commands have distinct aliases.
 
 ## Platform deployment
 
