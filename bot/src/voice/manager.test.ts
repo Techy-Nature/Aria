@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { PlayerManager } from "../player.js";
 import type { AudioSource, PlaybackEvent, VoiceTransport } from "./types.js";
 import { PlaybackCoordinator } from "./manager.js";
+import { PlaybackFeedback } from "./feedback.js";
 
 class FakeVoice implements VoiceTransport {
   calls: string[] = []; channels = new Map<string, string>(); events = new EventEmitter(); sources = new Map<string, { source: AudioSource; generation: number }>();
@@ -26,6 +27,7 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 5));
 test("coordinator connects once and controls real per-guild playback", async () => {
   const players = new PlayerManager(), voice = new FakeVoice(); const coordinator = new PlaybackCoordinator(players, voice);
   players.setVoiceChannel("g", "vc"); players.add("g", [track("one")]); await settle();
+  assert.equal(voice.sources.get("g")?.source.inputUrl, "https://media.example/one.mp3");
   players.add("g", [track("two")]); await settle();
   assert.equal(voice.calls.filter(x => x.startsWith("connect:")).length, 1);
   players.pause("g"); await settle(); players.pause("g"); await settle();
@@ -51,4 +53,11 @@ test("guild voice sessions are independent and shutdown cleans both", async () =
   for (const g of ["a", "b"]) { players.setVoiceChannel(g, `vc-${g}`); players.add(g, [track(g)]); }
   await settle(); assert.deepEqual([...voice.channels.keys()].sort(), ["a", "b"]);
   await coordinator.shutdown(); assert.equal(voice.channels.size, 0);
+});
+
+test("decoder failure produces safe user-visible feedback", async () => {
+  const players = new PlayerManager(), voice = new FakeVoice(), feedback = new PlaybackFeedback(), replies: string[] = [];
+  feedback.associate("g", async message => { replies.push(message); }); new PlaybackCoordinator(players, voice, feedback);
+  players.setVoiceChannel("g", "vc"); players.add("g", [track("broken"), track("next")]); await settle(); voice.end("g", "error"); await settle();
+  assert.deepEqual(replies, ["Playback failed while decoding the media."]); assert.equal(players.get("g").index, 1);
 });

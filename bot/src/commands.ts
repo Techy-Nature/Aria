@@ -2,6 +2,8 @@ import type { CommandContext, LoopMode, Track } from "./types.js";
 import { PlayerManager } from "./player.js";
 import { SearchService } from "./search.js";
 import { SettingsStore } from "./store.js";
+import { PlaybackFeedback } from "./voice/feedback.js";
+import { DirectMediaResolver, UnplayableSourceError, type PlayableSourceResolver } from "./voice/source.js";
 
 const aliases: Record<string, string> = { h: "help", pre: "prefix", sch: "search", dr: "defresult", pk: "pick", p: "play", enq: "enqueue", l: "loop", tl: "toggleloop", ql: "queuelist", dq: "defqueue", sk: "skip", rew: "rewind", rel: "reload", re: "restart", prv: "previous", ps: "pause", s: "stop", str: "stop-remove" };
 
@@ -33,7 +35,7 @@ function helpMessage(prefix: string, defaultResults: number, queuePageSize: numb
 }
 export class CommandRouter {
   private readonly searches = new Map<string, Track[]>();
-  constructor(readonly settings: SettingsStore, readonly players: PlayerManager, readonly search: SearchService) {}
+  constructor(readonly settings: SettingsStore, readonly players: PlayerManager, readonly search: SearchService, private readonly sources: PlayableSourceResolver = new DirectMediaResolver(), private readonly feedback?: PlaybackFeedback) {}
   async handle(ctx: CommandContext, content: string) {
     const cfg = this.settings.get(ctx.guildId); if (!content.startsWith(cfg.prefix)) return;
     const parts = content.slice(cfg.prefix.length).trim().split(/\s+/); const command = aliases[parts.shift()?.toLowerCase() ?? ""] ?? content.slice(cfg.prefix.length).trim().split(/\s+/)[0]?.toLowerCase();
@@ -46,7 +48,7 @@ export class CommandRouter {
         case "defqueue": this.settings.update(ctx.guildId, { queuePageSize: number(args[0], 10) }); return ctx.reply(`Queue page size: **${this.settings.get(ctx.guildId).queuePageSize}**.`);
         case "search": { const explicit = /^\d+$/.test(args[0] ?? "") ? Number(args.shift()) : cfg.defaultResults; const query = args.join(" "); if (!query) return ctx.reply("Give me something to search for."); const results = await this.search.search(query, number(String(explicit), cfg.defaultResults)); this.searches.set(`${ctx.guildId}:${ctx.userId}`, results); return ctx.reply(results.map((x, i) => `${i + 1}. **${x.title}** — ${x.artist}`).join("\n")); }
         case "pick": { const result = this.searches.get(`${ctx.guildId}:${ctx.userId}`)?.[number(args[0], 1) - 1]; if (!result) return ctx.reply("Search first, then pick a valid result number."); this.players.add(ctx.guildId, [result]); return ctx.reply(`Queued **${result.title}**.`); }
-        case "play": case "enqueue": { const query = args.join(" "); if (!query) return ctx.reply("Provide a song, playlist, or link."); if (!ctx.voiceChannelId) return ctx.reply("Join a voice channel first."); const currentVoice = this.players.get(ctx.guildId).voiceChannelId; if (currentVoice && currentVoice !== ctx.voiceChannelId) return ctx.reply("Join Aria's current voice channel first."); const tracks = await this.search.search(query, 1); this.players.setVoiceChannel(ctx.guildId, ctx.voiceChannelId); this.players.add(ctx.guildId, tracks, command === "enqueue"); return ctx.reply(`${command === "enqueue" ? "Playing next" : "Queued"}: **${tracks[0].title}**.`); }
+        case "play": case "enqueue": { const query = args.join(" "); if (!query) return ctx.reply("Provide a song, playlist, or link."); if (!ctx.voiceChannelId) return ctx.reply("Join a voice channel first."); const currentVoice = this.players.get(ctx.guildId).voiceChannelId; if (currentVoice && currentVoice !== ctx.voiceChannelId) return ctx.reply("Join Aria's current voice channel first."); const tracks = await this.search.search(query, 1); try { await this.sources.resolve(tracks[0]); } catch (error) { if (error instanceof UnplayableSourceError) return ctx.reply(`I couldn't play that source: ${error.message}`); throw error; } this.feedback?.associate(ctx.guildId, ctx.reply); this.players.setVoiceChannel(ctx.guildId, ctx.voiceChannelId); this.players.add(ctx.guildId, tracks, command === "enqueue"); return ctx.reply(`${command === "enqueue" ? "Playing next" : "Queued"}: **${tracks[0].title}**.`); }
         case "loop": return ctx.reply("Choose a loop mode: **song**, **playlist**, or **off**.", { buttons: ["song", "playlist", "off"] });
         case "toggleloop": { const raw = args.join(" "); const mode: LoopMode = ["s", "song"].includes(raw) ? "song" : ["pl", "playlist"].includes(raw) ? "playlist" : "off"; this.players.setLoop(ctx.guildId, this.players.get(ctx.guildId).loop === mode ? "off" : mode); return ctx.reply(`Loop: **${this.players.get(ctx.guildId).loop}**.`); }
         case "queuelist": { const s = this.players.get(ctx.guildId); const lines = s.queue.slice(s.index, s.index + cfg.queuePageSize).map((x, i) => `${i + s.index + 1}. **${x.title}**${i === 0 ? " ← now" : ""}`); return ctx.reply(lines.join("\n") || "The queue is empty."); }
