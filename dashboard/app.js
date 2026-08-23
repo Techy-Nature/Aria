@@ -1,6 +1,6 @@
 // Set DEFAULT_API_BASE to your remote backend URL (e.g. "https://your-aria-bot.com") when deploying on GitHub Pages.
 // Leave as empty string "" when running locally or on the same domain as the backend.
-const DEFAULT_API_BASE = "";
+const DEFAULT_API_BASE = "https://aria-fdyw.onrender.com";
 
 const $ = selector => document.querySelector(selector);
 const apiBaseKey = "aria-api-base";
