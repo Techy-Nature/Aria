@@ -2,7 +2,7 @@
 
 Aria is a TypeScript music-bot core and JavaScript web player for **Stoat** and **Fluxer**. Its default prefix is `a!`; every server can change its own prefix and search/queue defaults. The core deliberately separates platform gateway/voice transport from commands so the same queue behaves identically on both services.
 
-> **Integration status:** the command engine, state machine, search, API, responsive dashboard, theme system, and console development adapter are implemented. The repository does not pretend that a chat message is audio: a production deployment must connect the `PlatformAdapter` contract in `bot/src/types.ts` to the current Stoat and Fluxer gateway/voice SDKs (or Lavalink) and replace demo OAuth. `ConsoleAdapter` makes every command and the dashboard runnable while that deployment-specific step is configured.
+> **Integration status:** the command engine, state machine, search, API, responsive dashboard, theme system, Fluxer OAuth login, and console development adapter are implemented. The repository does not pretend that a chat message is audio: a production deployment must connect the `PlatformAdapter` contract in `bot/src/types.ts` to the current Stoat and Fluxer gateway/voice SDKs (or Lavalink). `ConsoleAdapter` makes every command and the dashboard runnable while that deployment-specific step is configured.
 
 ## Quick start
 
@@ -14,7 +14,7 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3000>. At the terminal, try `a!play yellow submarine`, `a!queuelist`, or `a!skip`. Click either dashboard sign-in button to obtain a local demo session. For real YouTube search results, add a YouTube Data API v3 key as `YOUTUBE_API_KEY`; without one, Aria returns safe search-preview links.
+Register a Fluxer OAuth application, add `http://localhost:3000/api/auth/fluxer/callback` as its redirect URI, and set `FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET`. Then open <http://localhost:3000>. At the terminal, try `a!play yellow submarine`, `a!queuelist`, or `a!skip`. For real YouTube search results, add a YouTube Data API v3 key as `YOUTUBE_API_KEY`; without one, Aria returns safe search-preview links.
 
 ## Commands
 
@@ -44,10 +44,10 @@ Open <http://localhost:3000>. At the terminal, try `a!play yellow submarine`, `a
 
 ## Platform deployment
 
-1. Create a Stoat or Fluxer bot and OAuth application, then keep credentials only in `.env`/your host's secret manager.
+1. Create a Fluxer bot and OAuth application, then keep credentials only in `.env`/your host's secret manager. Set `PUBLIC_URL` to the backend's public origin and, when separately hosted, `DASHBOARD_URL` to the dashboard origin. The registered callback is `<PUBLIC_URL>/api/auth/fluxer/callback`.
 2. Implement `PlatformAdapter.start()` to normalize incoming message events to `CommandContext`. Map button interaction values (`song`, `playlist`, `off`) to `PlayerManager.setLoop()`.
 3. Attach the platform's voice implementation or a Lavalink node to player change events. Resolve playlist links into individual `Track` objects and report actual duration/position.
-4. Replace `/api/auth/:platform` in `bot/src/server.ts` with OAuth authorization and callback routes. Validate provider access tokens and determine the shared guild plus the user's voice channel before accepting controls.
+4. Extend the Fluxer login's authorization model to determine the shared guild plus the user's voice channel before accepting controls. Stoat dashboard login remains disabled until Stoat publishes an OAuth application registration flow.
 5. Use a durable database implementation for `SettingsStore` when deploying more than one process.
 
 The `ARIA_TOKEN` and `ARIA_PLATFORM` environment values are reserved for the selected production adapter. The bot API must run on a persistent Node host; GitHub Pages hosts only the dashboard.
@@ -70,7 +70,7 @@ npm test
 
 ## Security notes
 
-The bundled bearer token is explicitly a local demo. Do not expose it publicly. Production must use provider OAuth with state/PKCE where supported, secure HTTP-only cookies, authorization checks for every guild action, HTTPS, rate limits, input limits, and a restrictive CORS policy. Media playback must comply with the source service's terms and applicable copyright law.
+Fluxer login uses authorization-code OAuth with state, PKCE, provider-side account verification, short-lived opaque server sessions, and HTTP-only cookies. Production still needs durable shared session storage, authorization checks for every guild action, HTTPS, rate limits, and input limits. Configure a single trusted `DASHBOARD_URL`; do not use a wildcard CORS origin with credentials. Media playback must comply with the source service's terms and applicable copyright law.
 
 ## License
 

@@ -16,8 +16,8 @@ The dashboard can be published directly to GitHub Pages via the included GitHub 
    - **Option B (URL query parameter):** Open the GitHub Pages dashboard once with `?api=https://your-bot.onrender.com`. The URL will be saved to your browser's local storage automatically.
 3. Make sure your bot backend (in `bot/`) is hosted on a persistent Node host (Render, Railway, Fly.io, etc.).
 
-## Authentication and security
+## Fluxer authentication
 
-The included callback creates a **demo token only**, so local development is immediate. Before public deployment, register OAuth applications with Stoat and Fluxer, redirect `/api/auth/:platform` to the provider, validate the callback server-side, and store an encrypted, HTTP-only session. Never put bot tokens or OAuth client secrets in this directory.
+Register a Fluxer OAuth application with `<PUBLIC_URL>/api/auth/fluxer/callback` as its redirect URI. On the backend set `PUBLIC_URL`, `DASHBOARD_URL`, `FLUXER_CLIENT_ID`, and `FLUXER_CLIENT_SECRET`. The callback exchanges the authorization code server-side, verifies the account through Fluxer's `userinfo` endpoint, and gives the browser an opaque HTTP-only session cookie; no access token is exposed to the dashboard. Stoat login is temporarily disabled because Stoat has not yet exposed and documented its OAuth application registration flow. Never put bot tokens or OAuth client secrets in this directory.
 
 The player discovers the signed-in user's guild and voice state through `/api/state`, searches through `/api/search`, and sends controls through `/api/control/:action`. Right-click any search result to open the provider URL without queueing it. Theme and accent choices are stored in local storage; WCAG-style luminance calculations automatically choose light or dark text.

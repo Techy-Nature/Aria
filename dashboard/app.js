@@ -3,37 +3,29 @@
 const DEFAULT_API_BASE = "";
 
 const $ = selector => document.querySelector(selector);
-const tokenKey = "aria-token";
 const apiBaseKey = "aria-api-base";
 const guildId = "demo";
 
 const params = new URLSearchParams(location.search);
-const queryToken = params.get("token");
 const queryApi = params.get("api");
 
 if (queryApi) {
   localStorage.setItem(apiBaseKey, queryApi);
 }
-if (queryToken) {
-  localStorage.setItem(tokenKey, queryToken);
-}
-if (queryToken || queryApi) {
-  params.delete("token");
+if (queryApi) {
   params.delete("api");
   const newQuery = params.toString() ? `?${params.toString()}` : "";
   history.replaceState({}, "", `${location.pathname}${newQuery}`);
 }
 
 const getApiBase = () => (localStorage.getItem(apiBaseKey) || DEFAULT_API_BASE).replace(/\/$/, "");
-const token = () => localStorage.getItem(tokenKey);
-
 const api = async (path, options = {}) => {
   const url = `${getApiBase()}${path}`;
   const response = await fetch(url, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token()}`,
       ...options.headers
     }
   });
@@ -101,7 +93,6 @@ function render(state) {
 const escapeHtml = value => String(value).replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
 
 async function refresh() {
-  if (!token()) return;
   try {
     render(await api(`/api/state?guild=${guildId}`));
   } catch (e) {
@@ -119,7 +110,6 @@ document.querySelectorAll("[data-action]").forEach(button =>
 
 $("#search-form").addEventListener("submit", async event => {
   event.preventDefault();
-  if (!token()) return ($("#connection").textContent = "Sign in before searching.");
   const results = await api(`/api/search?q=${encodeURIComponent($("#search").value)}`);
   $("#results").innerHTML = results.map((t, i) => `<a class="result" href="${t.url}" target="_blank" rel="noreferrer" data-i="${i}"><img src="${t.artwork ?? artFallback}" alt=""><span><strong>${escapeHtml(t.title)}</strong><small>${escapeHtml(t.artist)}</small></span><b>＋</b></a>`).join("");
   document.querySelectorAll(".result").forEach(link =>
@@ -130,4 +120,3 @@ $("#search-form").addEventListener("submit", async event => {
     })
   );
 });
-
