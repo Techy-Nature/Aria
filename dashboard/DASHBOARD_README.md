@@ -8,7 +8,7 @@ From the repository root, install and run Aria (`npm install && npm run dev`), t
 
 ## Host on GitHub Pages
 
-The dashboard can be published directly to GitHub Pages via the included GitHub Actions workflow (`.github/workflows/deploy-dashboard.yml`).
+The dashboard can be published directly to GitHub Pages via the included GitHub Actions workflow (`.github/workflows/deploy_dashboard.yaml`).
 
 1. Enable GitHub Pages in your repository settings under **Settings > Pages** and set **Source** to **GitHub Actions**.
 2. To connect the GitHub Pages player to your backend bot:
