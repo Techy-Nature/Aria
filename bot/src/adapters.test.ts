@@ -31,7 +31,12 @@ test("Fluxer normalizes messages, ignores bots, and replies to source channel", 
 test("Stoat normalizes server messages, ignores self, and replies to source channel", async () => {
   const requests: string[] = []; const socket = new FakeSocket(); const contexts: CommandContext[] = [];
   const adapter = new StoatAdapter("secret", async url => { requests.push(String(url)); return response(); }, () => socket as never); await adapter.start(async ctx => { contexts.push(ctx); }); socket.emit("open");
-  adapter.handleEvent({ type: "Ready", users: [{ _id: "self", relationship: "User" }], channels: [{ _id: "c", server: "g" }] });
+  // Current Stoat Ready users use RelationshipStatus "User" for the authenticated
+  // session user, including bot sessions; other users have another relationship.
+  adapter.handleEvent({ type: "Ready", users: [
+    { _id: "friend", username: "Listener", discriminator: "0001", relationship: "Friend", online: true },
+    { _id: "self", username: "Aria", discriminator: "0002", relationship: "User", online: true, bot: { owner: "owner" } },
+  ], channels: [{ _id: "c", channel_type: "TextChannel", server: "g", name: "music" }] });
   adapter.handleEvent({ type: "Bulk", v: [{ type: "Message", channel: "c", author: "u", content: "a!help" }, { type: "Message", channel: "c", author: "self", content: "ignore" }] });
   await new Promise(resolve => setImmediate(resolve)); assert.equal(contexts.length, 1); assert.equal(contexts[0].guildId, "g"); await contexts[0].reply("answer"); assert.equal(requests[0], "https://api.stoat.chat/channels/c/messages"); await adapter.stop();
 });

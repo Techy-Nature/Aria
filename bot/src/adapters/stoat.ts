@@ -32,6 +32,9 @@ export class StoatAdapter implements PlatformAdapter {
   }
   private loadReady(event: Record<string, unknown>) {
     if (Array.isArray(event.channels)) for (const item of event.channels) { const c = record(item), id = text(c?._id), server = text(c?.server); if (id && server) this.channels.set(id, server); }
+    // Stoat's RelationshipStatus "User" means the current session user. This is
+    // also the exact mechanism used by the official JS client's Ready handler:
+    // stoatchat/javascript-client-sdk, src/events/v1.ts (handleEvent/Ready).
     if (Array.isArray(event.users)) for (const item of event.users) { const u = record(item); if (u?.relationship === "User") this.selfId = text(u._id); }
     if (Array.isArray(event.voice_states)) for (const item of event.voice_states) { const state = record(item), cid = text(state?.id); if (cid && Array.isArray(state?.participants)) for (const p of state.participants) { const participant = record(p), uid = text(participant?.id); if (uid) this.voice.set(uid, cid); } }
   }
