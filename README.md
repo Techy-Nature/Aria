@@ -2,7 +2,7 @@
 
 Aria is a TypeScript music-bot core and JavaScript web player for **Stoat** and **Fluxer**. Its default prefix is `a!`; every server can change its own prefix and search/queue defaults. The core deliberately separates platform gateway/voice transport from commands so the same queue behaves identically on both services.
 
-> **Integration status:** the command engine, state machine, search, API, responsive dashboard, theme system, Fluxer OAuth login, and console development adapter are implemented. The repository does not pretend that a chat message is audio: a production deployment must connect the `PlatformAdapter` contract in `bot/src/types.ts` to the current Stoat and Fluxer gateway/voice SDKs (or Lavalink). `ConsoleAdapter` makes every command and the dashboard runnable while that deployment-specific step is configured.
+> **Integration status:** the command engine, dashboard, Fluxer OAuth login, and Fluxer/Stoat text gateway adapters are implemented. Voice/audio transport is deliberately not implemented yet; queue commands update Aria's player state but do not play audio.
 
 ## Quick start
 
@@ -44,13 +44,31 @@ Register a Fluxer OAuth application, add `http://localhost:3000/api/auth/fluxer/
 
 ## Platform deployment
 
-1. Create a Fluxer bot and OAuth application, then keep credentials only in `.env`/your host's secret manager. Set `PUBLIC_URL` to the backend's public origin and, when separately hosted, `DASHBOARD_URL` to the dashboard origin. The registered callback is `<PUBLIC_URL>/api/auth/fluxer/callback`.
-2. Implement `PlatformAdapter.start()` to normalize incoming message events to `CommandContext`. Map button interaction values (`song`, `playlist`, `off`) to `PlayerManager.setLoop()`.
-3. Attach the platform's voice implementation or a Lavalink node to player change events. Resolve playlist links into individual `Track` objects and report actual duration/position.
-4. Extend the Fluxer login's authorization model to determine the shared guild plus the user's voice channel before accepting controls. Stoat dashboard login remains disabled until Stoat publishes an OAuth application registration flow.
-5. Use a durable database implementation for `SettingsStore` when deploying more than one process.
+Set these Render environment variables (the platform name is case-insensitive):
 
-The `ARIA_TOKEN` and `ARIA_PLATFORM` environment values are reserved for the selected production adapter. The bot API must run on a persistent Node host; GitHub Pages hosts only the dashboard.
+```env
+ARIA_PLATFORM=fluxer
+ARIA_TOKEN=<Fluxer bot token>
+ARIA_PREFIX=a!
+```
+
+or:
+
+```env
+ARIA_PLATFORM=stoat
+ARIA_TOKEN=<Stoat bot token>
+ARIA_PREFIX=a!
+```
+
+Use `ARIA_PLATFORM=console` (or omit it) for local terminal development. Selecting Fluxer or Stoat without `ARIA_TOKEN` intentionally fails startup rather than starting an offline console bot. Never expose the token in logs.
+
+`ARIA_TOKEN` authenticates the **chat bot connection**. It is unrelated to `FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET`, which remain the OAuth application credentials used for **dashboard user login**. Set `PUBLIC_URL` to the backend's public origin and `DASHBOARD_URL` to the dashboard origin; the OAuth callback is `<PUBLIC_URL>/api/auth/fluxer/callback`.
+
+Fluxer uses an unprefixed token in gateway `IDENTIFY`/`RESUME` payloads and `Authorization: Bot <token>` for REST message sends. The exact opcode values come from Fluxer's [`packages/constants/src/GatewayConstants.ts`](https://github.com/fluxerapp/fluxer/blob/main/packages/constants/src/GatewayConstants.ts), while HELLO, IDENTIFY, heartbeat, and RESUME payload behavior follows [`fluxer_app/src/features/gateway/transport/GatewaySocket.ts`](https://github.com/fluxerapp/fluxer/blob/main/fluxer_app/src/features/gateway/transport/GatewaySocket.ts). REST message sending follows Fluxer's [`MessageController.ts`](https://github.com/fluxerapp/fluxer/blob/main/fluxer_api/src/api/channel/controllers/MessageController.ts).
+
+Stoat connects to event protocol v1 JSON, authenticates with the token, sends 30-second Ping events, and uses `X-Bot-Token` for REST. Stoat self-user identification deliberately follows the official client's Ready handler: [`src/events/v1.ts`](https://github.com/stoatchat/javascript-client-sdk/blob/main/src/events/v1.ts) assigns the Ready user whose `relationship` is `User` as the current session user, and the current API schema defines that value as the user's relationship to themselves. Connection authentication and Ping behavior follow [`src/events/EventClient.ts`](https://github.com/stoatchat/javascript-client-sdk/blob/main/src/events/EventClient.ts).
+
+The adapters cache gateway voice-state events when supplied, so `voiceChannelId` is best-effort and may be undefined until the relevant state has been observed. Voice/audio playback remains future work. Stoat DMs are ignored because they have no server ID; Fluxer messages from bots and Stoat webhook messages are ignored. For multi-process deployment, replace the in-memory `SettingsStore` with durable shared storage.
 
 ## Architecture
 
@@ -58,7 +76,8 @@ The `ARIA_TOKEN` and `ARIA_PLATFORM` environment values are reserved for the sel
 * `bot/src/player.ts` — deterministic per-guild queues, history, loop modes, and controls.
 * `bot/src/search.ts` — links, previews, and YouTube API search.
 * `bot/src/server.ts` — authenticated JSON API and static dashboard host.
-* `bot/src/platform.ts` — local adapter and production adapter seam.
+* `bot/src/adapters/` — Fluxer and Stoat text gateway/REST adapters.
+* `bot/src/platform.ts` — local console adapter and adapter exports.
 * `dashboard/` — dependency-free GitHub Pages compatible player. See [dashboard documentation](dashboard/DASHBOARD_README.md).
 
 ## Build and test

@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import type { CommandContext, PlatformAdapter } from "./types.js";
 
-/** A development adapter. Production Stoat/Fluxer gateway events should be normalized to CommandContext here. */
+/** A development adapter for local command testing. */
 export class ConsoleAdapter implements PlatformAdapter {
   private input = createInterface({ input: process.stdin, output: process.stdout });
   async start(onMessage: (ctx: CommandContext, content: string) => Promise<void>) {
@@ -10,3 +10,6 @@ export class ConsoleAdapter implements PlatformAdapter {
   }
   async stop() { this.input.close(); }
 }
+
+export { FluxerAdapter } from "./adapters/fluxer.js";
+export { StoatAdapter } from "./adapters/stoat.js";
