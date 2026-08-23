@@ -20,6 +20,7 @@ Register a Fluxer OAuth application, add `http://localhost:3000/api/auth/fluxer/
 
 | Command | Alias | Behavior |
 |---|---|---|
+| `help` | `h` | Show every command, alias, usage, and the server's current settings. |
 | `prefix <prefix>` | `pre` | Change this server's prefix (1–8 characters). |
 | `search [count] <terms>` | `sch` | Save a numbered search result list. Count defaults to `defresult`. |
 | `defresult <count>` | `dr` | Set default result count (initially 10, maximum 25). |

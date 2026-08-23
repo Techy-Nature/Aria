@@ -3,7 +3,34 @@ import { PlayerManager } from "./player.js";
 import { SearchService } from "./search.js";
 import { SettingsStore } from "./store.js";
 
-const aliases: Record<string, string> = { pre: "prefix", sch: "search", dr: "defresult", pk: "pick", p: "play", enq: "enqueue", l: "loop", tl: "toggleloop", ql: "queuelist", dq: "defqueue", sk: "skip", rew: "rewind", rel: "reload", re: "restart", prv: "previous", ps: "pause", s: "stop", str: "stop-remove" };
+const aliases: Record<string, string> = { h: "help", pre: "prefix", sch: "search", dr: "defresult", pk: "pick", p: "play", enq: "enqueue", l: "loop", tl: "toggleloop", ql: "queuelist", dq: "defqueue", sk: "skip", rew: "rewind", rel: "reload", re: "restart", prv: "previous", ps: "pause", s: "stop", str: "stop-remove" };
+
+const helpCommands = [
+  ["help", "h", "Show this command guide."],
+  ["prefix <prefix>", "pre", "Change the server prefix (1–8 characters)."],
+  ["search [count] <terms>", "sch", "Show and save numbered search results."],
+  ["defresult <count>", "dr", "Set default search results (1–25)."],
+  ["pick <number>", "pk", "Queue a result from your latest search."],
+  ["play <terms-or-url>", "p", "Add a song or playlist to the queue."],
+  ["enqueue <terms-or-url>", "enq", "Insert a song immediately after the current one."],
+  ["loop", "l", "Show the song, playlist, and off loop choices."],
+  ["toggleloop <song|playlist|off>", "tl <s|pl|off>", "Toggle a loop mode."],
+  ["queuelist", "ql", "Show the current queue."],
+  ["defqueue <count>", "dq", "Set displayed queue entries (1–25)."],
+  ["skip", "sk", "Advance to the next track."],
+  ["rewind", "rew", "Return to the current track's beginning."],
+  ["reload", "rel", "Return to the current playlist's beginning."],
+  ["restart", "re", "Return to the complete queue's beginning."],
+  ["previous", "prv", "Play the previous track."],
+  ["pause", "ps", "Toggle pause or resume."],
+  ["stop", "s", "Stop and leave voice, retaining the queue."],
+  ["stop-remove", "str", "Stop, clear the queue, and leave voice."],
+] as const;
+
+function helpMessage(prefix: string, defaultResults: number, queuePageSize: number) {
+  const commands = helpCommands.map(([usage, alias, description]) => `\`${prefix}${usage}\` (\`${alias}\`) — ${description}`).join("\n");
+  return `**Aria commands**\n${commands}\n\n\`<value>\` is required; \`[value]\` is optional. Current defaults: prefix \`${prefix}\`, ${defaultResults} search results, ${queuePageSize} queue entries.`;
+}
 export class CommandRouter {
   private readonly searches = new Map<string, Track[]>();
   constructor(readonly settings: SettingsStore, readonly players: PlayerManager, readonly search: SearchService) {}
@@ -13,6 +40,7 @@ export class CommandRouter {
     const args = parts; const number = (value: string | undefined, fallback: number) => Math.max(1, Math.min(25, Number(value) || fallback));
     try {
       switch (command) {
+        case "help": return ctx.reply(helpMessage(cfg.prefix, cfg.defaultResults, cfg.queuePageSize));
         case "prefix": { const value = args[0]; if (!value || value.length > 8) return ctx.reply("Prefix must be 1–8 characters."); this.settings.update(ctx.guildId, { prefix: value }); return ctx.reply(`Prefix changed to **${value}**.`); }
         case "defresult": this.settings.update(ctx.guildId, { defaultResults: number(args[0], 10) }); return ctx.reply(`Default search results: **${this.settings.get(ctx.guildId).defaultResults}**.`);
         case "defqueue": this.settings.update(ctx.guildId, { queuePageSize: number(args[0], 10) }); return ctx.reply(`Queue page size: **${this.settings.get(ctx.guildId).queuePageSize}**.`);
