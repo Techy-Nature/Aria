@@ -24,12 +24,16 @@ Provider behavior is deliberately split between stable search/queue metadata and
 |---|---:|---:|
 | Direct HTTP(S) URL | No | Yes |
 | SoundCloud | Yes | Yes, public off-platform-streamable tracks |
-| YouTube | Yes | Not yet (metadata only) |
+| YouTube | Yes | Yes, via yt-dlp |
+| YouTube Music | Via YouTube | Yes, via yt-dlp |
+| Radio stream | No | Yes, via FFmpeg |
 | Pixabay | No* | Direct media URLs only |
 
 SoundCloud requires `SOUNDCLOUD_CLIENT_ID` and `SOUNDCLOUD_CLIENT_SECRET`. Create an application through SoundCloud, keep both values in deployment secrets, and use credentials authorized for its [official public API](https://developers.soundcloud.com/docs/api/guide). Aria authenticates the initial OAuth client-credentials exchange with HTTP Basic authentication, caches the resulting access token, and uses SoundCloud's documented form-authenticated refresh grant to replace each single-use refresh token before expiry (falling back to a new client-credentials exchange only when refresh is unavailable or rejected). Search explicitly requests SoundCloud's linked-partition response format and consumes its first `collection`. Stable queue entries use the complete SoundCloud track URN; public track pages are resolved through the API, and the current stream is requested only when playback starts. Aria prefers `hls_aac_160_url`, falls back to `hls_aac_96_url`, and sends that temporary AAC HLS input directly to FFmpeg. Tokens, authorization headers, secrets, and signed HLS inputs never enter a `Track` or public player snapshot.
 
-YouTube search requires `YOUTUBE_API_KEY` and uses the official YouTube Data API. Results retain the video/playlist identity, canonical URL, channel, and artwork, but that API does not provide an audio stream. Aria therefore labels these results **search only** and reports playback as unsupported; it does not scrape pages, decipher signatures, or invoke an unofficial downloader.
+YouTube search and playlist importing require `YOUTUBE_API_KEY` and use the official YouTube Data API. Results retain stable video identity, canonical URL, channel, and artwork. `play` appends every available video in a playlist to the queue; `enqueue` inserts the complete playlist, in order, immediately after the current song. Each item keeps its playlist identity for queue controls. At the moment each queued video begins, the reusable yt-dlp resolver obtains an ephemeral audio URL and required HTTP headers for the existing FFmpeg pipeline. YouTube Music watch and playlist links use the same `youtube` queue identity.
+
+Playback requires a reasonably current [yt-dlp](https://github.com/yt-dlp/yt-dlp) executable. Set `YTDLP_PATH` for a custom executable, otherwise Aria uses `yt-dlp` from `PATH`. Aria never installs or auto-updates it at runtime. YouTube delivery changes can temporarily break extraction, so deployment maintainers must update their image when appropriate. Browser cookies are not read; authenticated, private, age-gated, geo-restricted, and DRM-protected media may be unavailable. Only explicitly allowlisted YouTube hosts are passed to yt-dlp.
 
 Pixabay's [official API documentation](https://pixabay.com/api/docs/) documents image and video search, not a supported music/audio API. Aria consequently has no native Pixabay provider and does not scrape its site or use internal endpoints. An actual authorized HTTP(S) audio URL can still use the direct provider.
 
@@ -102,7 +106,7 @@ The shared decoder accepts provider-resolved, authorized HTTP(S) media URLs and 
 
 ### Render requirements
 
-Use a Render **Docker** service or install FFmpeg in the native service build image. For Docker, install the distro `ffmpeg` package and leave `FFMPEG_PATH` unset; for a custom location set it to the absolute executable path. Do not commit an FFmpeg binary. Voice needs a continuously running instance and outbound HTTPS/WebSocket/WebRTC/UDP connectivity. A free service may spin down, restart, throttle CPU, or lack stable UDP, interrupting continuous voice; use an always-on instance for reliable playback. No Lavalink or additional hosted service is required.
+Use a Render **Docker** service with the repository's `Dockerfile` (recommended); it installs Node 22, FFmpeg, and yt-dlp. Alternatively install both executables in a native service image. Leave `FFMPEG_PATH` and `YTDLP_PATH` unset for executables on `PATH`, or point them at explicitly installed locations. Aria does not download or update binaries at startup, and no binary is committed. Voice needs a continuously running instance and outbound HTTPS/WebSocket/WebRTC/UDP connectivity. A free service may spin down, restart, throttle CPU, or lack stable UDP, interrupting continuous voice; use an always-on instance for reliable playback. No Lavalink or additional hosted service is required.
 
 ### Deployment smoke tests
 

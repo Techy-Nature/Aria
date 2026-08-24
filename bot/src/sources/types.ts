@@ -16,6 +16,8 @@ export interface MediaProvider {
   readonly supportsPlayback: boolean;
   canHandle(input: string): boolean;
   search?(query: string, limit: number): Promise<Track[]>;
-  fromUrl?(input: string): Promise<Track>;
+  /** A URL may represent one track or an explicitly supported playlist. */
+  fromUrl?(input: string): Promise<Track | Track[]>;
   resolve(track: Track, positionSeconds?: number): Promise<PlayableMedia>;
+  shutdown?(): void;
 }
