@@ -55,6 +55,14 @@ export async function pumpPcm(stream: Readable, sink: FrameSink, signal: AbortSi
 export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSource): Promise<Decoder> {
   const args = ["-hide_banner", "-loglevel", "warning", "-nostdin", "-re"];
   if ((source.positionSeconds ?? 0) > 0) args.push("-ss", String(source.positionSeconds));
+  if (source.requestHeaders && Object.keys(source.requestHeaders).length) {
+    // Values originate only in a provider response. Reject line breaks so a
+    // malformed extractor response cannot inject additional protocol headers.
+    const headers = Object.entries(source.requestHeaders)
+      .filter(([name, value]) => /^[A-Za-z0-9-]+$/.test(name) && !/[\r\n]/.test(value))
+      .map(([name, value]) => `${name}: ${value}\r\n`).join("");
+    if (headers) args.push("-headers", headers);
+  }
   args.push("-i", source.inputUrl, "-vn", "-ac", String(PCM_CHANNELS), "-ar", String(PCM_SAMPLE_RATE), "-f", "s16le", "pipe:1");
   const child = spawn(process.env.FFMPEG_PATH ?? "ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
   const abort = new AbortController(); let stderr = "", manual = false;

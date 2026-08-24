@@ -70,10 +70,11 @@ test("SoundCloud blocked tracks return a useful error", async () => {
   await assert.rejects(provider.resolve({ id: sc.urn, providerId: sc.urn, provider: "soundcloud", title: "x", artist: "x", duration: 0, url: sc.permalink_url }), (error: unknown) => error instanceof UnplayableSourceError && /not available/.test(error.message));
 });
 
-test("YouTube search remains metadata-only", async () => {
-  const provider = new YouTubeProvider("key", async () => json({ items: [{ id: { videoId: "abc" }, snippet: { title: "Video", channelTitle: "Channel", thumbnails: { high: { url: "https://img" } } } }] }));
-  const [track] = await provider.search("video", 1); assert.equal(track.provider, "youtube"); assert.equal(track.playable, false);
-  await assert.rejects(provider.resolve(track), /playback is not currently supported/);
+test("YouTube Data API search keeps stable metadata and reflects resolver availability", async () => {
+  const resolver = { available: true, resolve: async () => ({ inputUrl: "https://signed.example/audio" }) };
+  const provider = new YouTubeProvider("key", async () => json({ items: [{ id: { videoId: "abc" }, snippet: { title: "Video", channelTitle: "Channel", thumbnails: { high: { url: "https://img" } } } }] }), resolver as never);
+  const [track] = await provider.search("video", 1); assert.equal(track.provider, "youtube"); assert.equal(track.providerId, "abc"); assert.equal(track.url, "https://youtube.com/watch?v=abc"); assert.equal(track.playable, true);
+  const media = await provider.resolve(track); assert.equal(media.ephemeral, true); assert.equal(JSON.stringify(track).includes("signed.example"), false);
 });
 
 test("player snapshots strip provider secrets and ephemeral URLs", () => {

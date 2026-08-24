@@ -1,6 +1,10 @@
 import type { Track } from "../types.js";
 
-export interface AudioSource { track: Track; inputUrl: string; positionSeconds?: number }
+export interface AudioSource {
+  track: Track; inputUrl: string; positionSeconds?: number;
+  /** Playback-only headers supplied by a trusted resolver; never part of Track/player state. */
+  requestHeaders?: Record<string, string>;
+}
 export type PlaybackEvent = { guildId: string; generation: number; type: "ended" | "error"; error?: Error };
 export interface VoiceTransport {
   connect(guildId: string, channelId: string): Promise<void>;

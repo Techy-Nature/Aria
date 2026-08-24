@@ -7,5 +7,5 @@ const playback = adapter.voice ? new PlaybackCoordinator(players, adapter.voice,
 await adapter.start((ctx, content) => router.handle(ctx, content));
 const server = createServer(players, search).listen(Number(process.env.PORT ?? 3000), () => console.log(`Dashboard: http://localhost:${process.env.PORT ?? 3000}`));
 let shuttingDown = false;
-async function shutdown(signal: string) { if (shuttingDown) return; shuttingDown = true; console.log(`Received ${signal}; shutting down`); await playback?.shutdown(); await adapter.stop(); server.close(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); }
+async function shutdown(signal: string) { if (shuttingDown) return; shuttingDown = true; console.log(`Received ${signal}; shutting down`); sources.shutdown(); await playback?.shutdown(); await adapter.stop(); server.close(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); }
 process.on("SIGTERM", () => void shutdown("SIGTERM")); process.on("SIGINT", () => void shutdown("SIGINT"));
