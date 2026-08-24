@@ -3,6 +3,7 @@ import { PlayerManager } from "../player.js";
 import type { PlaybackEvent, VoiceTransport } from "./types.js";
 import { PlaybackFeedback } from "./feedback.js";
 import { DirectMediaResolver, type PlayableSourceResolver } from "./source.js";
+import { ProviderUnavailableError, UnplayableSourceError } from "../sources/types.js";
 
 interface Observed { revision: number; trackId?: string; paused: boolean; generation: number; busy: Promise<void> }
 export class PlaybackCoordinator {
@@ -13,7 +14,11 @@ export class PlaybackCoordinator {
   }
   private enqueue(state: PlayerState) {
     const current = this.observed.get(state.guildId) ?? { revision: -1, paused: false, generation: 0, busy: Promise.resolve() };
-    current.busy = current.busy.then(() => this.reconcile(state, current)).catch(error => { console.error(`[Voice] ${error instanceof Error ? error.message : String(error)}`); void this.feedback?.report(state.guildId, "I couldn't connect to or play in that voice channel."); });
+    current.busy = current.busy.then(() => this.reconcile(state, current)).catch(error => {
+      console.error(`[Voice] ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof UnplayableSourceError || error instanceof ProviderUnavailableError ? error.message : "I couldn't connect to or play in that voice channel.";
+      void this.feedback?.report(state.guildId, message);
+    });
     this.observed.set(state.guildId, current);
   }
   private async reconcile(state: PlayerState, seen: Observed) {

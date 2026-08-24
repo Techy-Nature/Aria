@@ -4,6 +4,8 @@ import { CommandRouter } from "./commands.js";
 import { PlayerManager } from "./player.js";
 import { SearchService } from "./search.js";
 import { SettingsStore } from "./store.js";
+import { SourceManager } from "./sources/manager.js";
+import { YouTubeProvider } from "./sources/youtube.js";
 
 test("ps aliases the pause command", async () => {
   const players = new PlayerManager();
@@ -55,6 +57,14 @@ test("metadata-only search is rejected before play is reported successful", asyn
   const players = new PlayerManager(); const router = new CommandRouter(new SettingsStore(), players, new SearchService("")); const replies: string[] = [];
   await router.handle({ guildId: "guild", channelId: "text", userId: "user", voiceChannelId: "voice", reply: async message => { replies.push(message); } }, "a!play Yellow Submarine");
   assert.match(replies[0], /metadata-only.*direct media URL/i); assert.equal(players.get("guild").queue.length, 0);
+});
+
+test("pick rejects a metadata-only YouTube search result", async () => {
+  const youtube = new YouTubeProvider("key", async () => new Response(JSON.stringify({ items: [{ id: { videoId: "video" }, snippet: { title: "Search result", channelTitle: "Artist" } }] }), { status: 200 }));
+  const search = new SearchService(undefined, new SourceManager([youtube])); const players = new PlayerManager(); const router = new CommandRouter(new SettingsStore(), players, search); const replies: string[] = [];
+  const ctx = { guildId: "guild", channelId: "text", userId: "user", reply: async (message: string) => { replies.push(message); } };
+  await router.handle(ctx, "a!search song"); await router.handle(ctx, "a!pick 1");
+  assert.equal(replies[1], "That result is search-only and can't be played."); assert.equal(players.get("guild").queue.length, 0);
 });
 
 test("a direct HTTP media URL is accepted into voice playback state", async () => {

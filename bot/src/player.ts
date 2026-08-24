@@ -11,7 +11,10 @@ export class PlayerManager extends EventEmitter {
   snapshot(guildId: string) { return structuredClone(this.get(guildId)); }
   add(guildId: string, tracks: Track[], next = false) {
     const s = this.get(guildId); const at = next ? Math.min(s.index + 1, s.queue.length) : s.queue.length;
-    s.queue.splice(at, 0, ...tracks); this.changed(s); return s;
+    // Keep queue/dashboard state provider-neutral and exclude request headers,
+    // tokens, and ephemeral resolver fields even if an API client submits them.
+    const safe = tracks.map(({ id, title, url, artist, duration, artwork, playlistId, provider, providerId, webUrl, playable, attribution }) => ({ id, title, url, artist, duration, artwork, playlistId, provider, providerId, webUrl, playable, attribution }));
+    s.queue.splice(at, 0, ...safe); this.changed(s); return s;
   }
   playIndex(guildId: string, index: number) { const s = this.get(guildId); if (index < 0 || index >= s.queue.length) return; s.index = index; s.position = 0; s.paused = false; s.playbackRevision++; this.changed(s); }
   skip(guildId: string) { const s = this.get(guildId); if (s.queue[s.index]) s.history.push(s.queue[s.index]); if (s.loop !== "song") s.index = Math.min(s.index + 1, s.queue.length); if (s.loop === "playlist" && s.index >= s.queue.length) s.index = 0; s.position = 0; s.playbackRevision++; this.changed(s); }
