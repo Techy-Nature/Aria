@@ -16,16 +16,22 @@ export class SoundCloudProvider implements MediaProvider {
     this.refreshing = (async () => {
       if (!this.clientId || !this.clientSecret) throw new ProviderUnavailableError("SoundCloud search and playback are not configured.");
       let token: Token | undefined;
-      if (this.token?.refreshToken) token = await this.requestToken(new URLSearchParams({ grant_type: "refresh_token", refresh_token: this.token.refreshToken })).catch(() => undefined);
-      token ??= await this.requestToken(new URLSearchParams({ grant_type: "client_credentials" })).catch(() => { throw new ProviderUnavailableError("I couldn't reach SoundCloud right now."); });
+      if (this.token?.refreshToken) token = await this.refreshAccessToken(this.token.refreshToken).catch(() => undefined);
+      token ??= await this.requestClientCredentialsToken().catch(() => { throw new ProviderUnavailableError("I couldn't reach SoundCloud right now."); });
       this.token = { value: token.access_token, expiresAt: this.now() + token.expires_in * 1000, refreshToken: token.refresh_token };
       return token.access_token;
     })();
     try { return await this.refreshing; } finally { this.refreshing = undefined; }
   }
-  private async requestToken(body: URLSearchParams): Promise<Token> {
+  private async requestClientCredentialsToken(): Promise<Token> {
     const basic = Buffer.from(`${this.clientId}:${this.clientSecret}`, "utf8").toString("base64");
-    const response = await this.fetcher("https://secure.soundcloud.com/oauth/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", Authorization: `Basic ${basic}` }, body });
+    return this.requestToken(new URLSearchParams({ grant_type: "client_credentials" }), { Authorization: `Basic ${basic}` });
+  }
+  private refreshAccessToken(refreshToken: string): Promise<Token> {
+    return this.requestToken(new URLSearchParams({ grant_type: "refresh_token", client_id: this.clientId!, client_secret: this.clientSecret!, refresh_token: refreshToken }));
+  }
+  private async requestToken(body: URLSearchParams, authentication?: Record<string, string>): Promise<Token> {
+    const response = await this.fetcher("https://secure.soundcloud.com/oauth/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", ...authentication }, body });
     if (!response.ok) throw new Error("SoundCloud OAuth request failed");
     const token = await response.json() as Token;
     if (!token.access_token || !Number.isFinite(token.expires_in)) throw new Error("SoundCloud OAuth returned an invalid token");
@@ -40,7 +46,7 @@ export class SoundCloudProvider implements MediaProvider {
     const response = await this.fetcher(`https://api.soundcloud.com${path}`, { headers: { Authorization: `OAuth ${await this.accessToken()}`, Accept: "application/json" } });
     if (!response.ok) throw new ProviderUnavailableError("I couldn't reach SoundCloud right now."); return response.json() as Promise<T>;
   }
-  async search(query: string, limit: number): Promise<Track[]> { const body = await this.api<{ collection: ScTrack[] }>(`/tracks?q=${encodeURIComponent(query)}&limit=${limit}&access=playable`); return body.collection.filter(x => x.access !== "blocked" && x.streamable !== false).map(x => this.track(x)); }
+  async search(query: string, limit: number): Promise<Track[]> { const body = await this.api<{ collection: ScTrack[]; next_href?: string }>(`/tracks?q=${encodeURIComponent(query)}&limit=${limit}&access=playable&linked_partitioning=true`); return body.collection.filter(x => x.access !== "blocked" && x.streamable !== false).map(x => this.track(x)); }
   async fromUrl(input: string) { if (!this.canHandle(input)) throw new UnplayableSourceError("That is not a SoundCloud track URL."); return this.track(await this.api<ScTrack>(`/resolve?url=${encodeURIComponent(input)}`)); }
   async resolve(track: Track, positionSeconds = 0): Promise<PlayableMedia> {
     const resourceId = track.providerId ?? track.id.replace(/^soundcloud:(?:legacy:)?/, "");
