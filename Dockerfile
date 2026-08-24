@@ -22,4 +22,5 @@ COPY --from=build /app/bot/dist bot/dist
 COPY dashboard dashboard
 ENV NODE_ENV=production
 ENV YTDLP_PO_TOKEN_ENABLED=true
+ENV BGUTIL_SCRIPT_PATH=/root/bgutil-ytdlp-pot-provider/server/build/generate_once.js
 CMD ["npm", "start"]
