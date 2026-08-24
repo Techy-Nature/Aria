@@ -8,7 +8,11 @@ import { UnplayableSourceError } from "./types.js";
 import { PlayerManager } from "../player.js";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const sc = { id: 42, title: "A track", duration: 123000, permalink_url: "https://soundcloud.com/artist/a-track", artwork_url: "https://img.example/a.jpg", access: "playable", streamable: true, user: { username: "Artist", permalink_url: "https://soundcloud.com/artist" } };
+const sc = { urn: "soundcloud:tracks:42", id: 42, title: "A track", duration: 123000, permalink_url: "https://soundcloud.com/artist/a-track", artwork_url: "https://img.example/a.jpg", access: "playable", streamable: true, user: { username: "Artist", permalink_url: "https://soundcloud.com/artist" } };
+function oauthRequest(init?: RequestInit) {
+  const headers = new Headers(init?.headers); const authorization = headers.get("authorization") ?? ""; const body = new URLSearchParams(String(init?.body));
+  return { authorization, decoded: authorization.startsWith("Basic ") ? Buffer.from(authorization.slice(6), "base64").toString("utf8") : "", body };
+}
 
 test("detects providers and resolves only direct HTTP media unchanged", async () => {
   const manager = new SourceManager([new SoundCloudProvider("id", "secret"), new YouTubeProvider("key"), new DirectMediaProvider()]);
@@ -20,10 +24,11 @@ test("detects providers and resolves only direct HTTP media unchanged", async ()
   const playable = await manager.resolve(track); assert.equal(playable.inputUrl, track.url); assert.equal(playable.ephemeral, false);
 });
 
-test("SoundCloud search stores stable metadata and never a stream URL", async () => {
-  const calls: string[] = []; const fetcher: typeof fetch = async input => { const url = String(input); calls.push(url); return url.includes("oauth/token") ? json({ access_token: "TOKEN", expires_in: 3600 }) : json({ collection: [sc] }); };
+test("SoundCloud client credentials use Basic auth and stable URN metadata", async () => {
+  const calls: string[] = []; let auth: ReturnType<typeof oauthRequest> | undefined; const fetcher: typeof fetch = async (input, init) => { const url = String(input); calls.push(url); if (url.includes("oauth/token")) { auth = oauthRequest(init); return json({ access_token: "TOKEN", refresh_token: "REFRESH-1", expires_in: 3600 }); } return json({ collection: [sc] }); };
   const provider = new SoundCloudProvider("id", "secret", fetcher); const [track] = await provider.search("track", 2);
-  assert.equal(track.provider, "soundcloud"); assert.equal(track.providerId, "42"); assert.equal(track.url, sc.permalink_url); assert.equal(JSON.stringify(track).includes("TOKEN"), false); assert.equal(calls.some(x => x.includes("streams")), false);
+  assert.match(auth!.authorization, /^Basic /); assert.equal(auth!.decoded, "id:secret"); assert.equal(auth!.body.get("grant_type"), "client_credentials"); assert.equal(auth!.body.has("client_id"), false); assert.equal(auth!.body.has("client_secret"), false);
+  assert.equal(track.provider, "soundcloud"); assert.equal(track.providerId, sc.urn); assert.equal(track.id, sc.urn); assert.equal(track.url, sc.permalink_url); assert.equal(JSON.stringify(track).includes("TOKEN"), false); assert.equal(calls.some(x => x.includes("streams")), false);
 });
 
 test("SoundCloud caches tokens and concurrent callers share refresh", async () => {
@@ -33,21 +38,33 @@ test("SoundCloud caches tokens and concurrent callers share refresh", async () =
   await provider.search("d", 1); assert.equal(tokens, 1);
 });
 
-test("SoundCloud refreshes expired tokens", async () => {
-  let now = 0, tokens = 0; const fetcher: typeof fetch = async input => String(input).includes("oauth/token") ? json({ access_token: `token-${++tokens}`, expires_in: 120 }) : json({ collection: [sc] });
-  const provider = new SoundCloudProvider("id", "secret", fetcher, () => now); await provider.search("a", 1); now = 61_000; await provider.search("b", 1); assert.equal(tokens, 2);
+test("SoundCloud uses and replaces single-use refresh tokens after expiry", async () => {
+  let now = 0; const grants: Array<Record<string, string>> = []; const fetcher: typeof fetch = async (input, init) => { if (!String(input).includes("oauth/token")) return json({ collection: [sc] }); const body = oauthRequest(init).body; grants.push(Object.fromEntries(body)); return body.get("grant_type") === "client_credentials" ? json({ access_token: "token-1", refresh_token: "refresh-1", expires_in: 120 }) : json({ access_token: "token-2", refresh_token: "refresh-2", expires_in: 120 }); };
+  const provider = new SoundCloudProvider("id", "secret", fetcher, () => now); await provider.search("a", 1); now = 61_000; await provider.search("b", 1); now = 122_000; await provider.search("c", 1);
+  assert.deepEqual(grants, [{ grant_type: "client_credentials" }, { grant_type: "refresh_token", refresh_token: "refresh-1" }, { grant_type: "refresh_token", refresh_token: "refresh-2" }]);
+});
+
+test("SoundCloud concurrent expiry refresh is deduplicated", async () => {
+  let now = 0, tokenRequests = 0; const fetcher: typeof fetch = async (input, init) => { if (!String(input).includes("oauth/token")) return json({ collection: [sc] }); tokenRequests++; const grant = oauthRequest(init).body.get("grant_type"); if (grant === "refresh_token") await new Promise(resolve => setTimeout(resolve, 5)); return json({ access_token: `token-${tokenRequests}`, refresh_token: `refresh-${tokenRequests}`, expires_in: 120 }); };
+  const provider = new SoundCloudProvider("id", "secret", fetcher, () => now); await provider.search("initial", 1); now = 61_000; await Promise.all([provider.search("a", 1), provider.search("b", 1), provider.search("c", 1)]); assert.equal(tokenRequests, 2);
+});
+
+test("SoundCloud falls back to client credentials when refresh fails", async () => {
+  let now = 0; const grants: string[] = []; const fetcher: typeof fetch = async (input, init) => { if (!String(input).includes("oauth/token")) return json({ collection: [sc] }); const grant = oauthRequest(init).body.get("grant_type")!; grants.push(grant); if (grant === "refresh_token") return json({ error: "invalid_grant" }, 401); return json({ access_token: `token-${grants.length}`, refresh_token: `refresh-${grants.length}`, expires_in: 120 }); };
+  const provider = new SoundCloudProvider("id", "secret", fetcher, () => now); await provider.search("a", 1); now = 61_000; await provider.search("b", 1); assert.deepEqual(grants, ["client_credentials", "refresh_token", "client_credentials"]);
 });
 
 test("SoundCloud resolves AAC HLS at playback time and prefers 160 kbps", async () => {
   const calls: string[] = []; const fetcher: typeof fetch = async input => { const url = String(input); calls.push(url); if (url.includes("oauth/token")) return json({ access_token: "TOKEN", expires_in: 3600 }); if (url.endsWith("/streams")) return json({ hls_aac_96_url: "https://cdn.example/96.m3u8?sig=secret", hls_aac_160_url: "https://cdn.example/160.m3u8?sig=secret" }); return json(sc); };
   const provider = new SoundCloudProvider("id", "secret", fetcher); const track = await provider.fromUrl(sc.permalink_url); assert.equal(calls.some(x => x.endsWith("/streams")), false);
   const playable = await provider.resolve(track); assert.match(playable.inputUrl, /160\.m3u8/); assert.equal(playable.ephemeral, true); assert.equal(JSON.stringify(track).includes("m3u8"), false);
+  assert.ok(calls.includes("https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A42")); assert.ok(calls.includes("https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A42/streams"));
 });
 
 test("SoundCloud blocked tracks return a useful error", async () => {
   const fetcher: typeof fetch = async input => String(input).includes("oauth/token") ? json({ access_token: "TOKEN", expires_in: 3600 }) : json({ ...sc, access: "blocked" });
   const provider = new SoundCloudProvider("id", "secret", fetcher);
-  await assert.rejects(provider.resolve({ id: "soundcloud:42", providerId: "42", provider: "soundcloud", title: "x", artist: "x", duration: 0, url: sc.permalink_url }), (error: unknown) => error instanceof UnplayableSourceError && /not available/.test(error.message));
+  await assert.rejects(provider.resolve({ id: sc.urn, providerId: sc.urn, provider: "soundcloud", title: "x", artist: "x", duration: 0, url: sc.permalink_url }), (error: unknown) => error instanceof UnplayableSourceError && /not available/.test(error.message));
 });
 
 test("YouTube search remains metadata-only", async () => {
