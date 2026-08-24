@@ -13,7 +13,7 @@ export class FluxerAdapter implements PlatformAdapter, FluxerVoiceGateway {
   private socket?: WebSocket; private handler?: MessageHandler; private stopped = true;
   private heartbeat?: NodeJS.Timeout; private reconnect?: NodeJS.Timeout; private attempts = 0;
   private sequence: number | null = null; private sessionId?: string; private selfId?: string;
-  private memberVoice = new Map<string, string>();
+  private memberVoice = new Map<string, Map<string, string>>();
   private voiceWaiters = new Map<string, { resolve: (value: VoiceCredentials & { connectionId: string }) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout; channelId: string }>();
   constructor(private token: string, private fetcher: Fetch = fetch, private sockets: SocketFactory = defaultSocketFactory) { this.voice = new FluxerVoiceTransport(this); }
 
@@ -41,16 +41,37 @@ export class FluxerAdapter implements PlatformAdapter, FluxerVoiceGateway {
     if (packet.op === 12) { const d = record(packet.d), code = text(d?.code); console.error(`[Fluxer] Gateway error${code ? ` ${code}` : ""}: ${String(d?.message ?? "unknown")}`); if (code?.startsWith("VOICE_")) { const message = code === "VOICE_PERMISSION_DENIED" ? "Missing permission to connect or speak in that Fluxer voice channel." : `Fluxer voice request failed (${code}).`; for (const [guildId, waiter] of this.voiceWaiters) { clearTimeout(waiter.timeout); waiter.reject(new Error(message)); this.voiceWaiters.delete(guildId); } } return; }
     if (packet.op !== 0 || typeof packet.t !== "string") return;
     const d = record(packet.d); if (!d) return;
-    if (packet.t === "READY") { this.sessionId = text(d.session_id); const user = record(d.user); this.selfId = text(user?.id); this.attempts = 0; console.log(`[Fluxer] Authenticated as ${text(user?.username) ?? "bot"} (${this.selfId ?? "unknown id"})`); console.log("[Fluxer] Ready"); return; }
+    if (packet.t === "READY") { this.memberVoice.clear(); this.sessionId = text(d.session_id); const user = record(d.user); this.selfId = text(user?.id); this.attempts = 0; console.log(`[Fluxer] Authenticated as ${text(user?.username) ?? "bot"} (${this.selfId ?? "unknown id"})`); console.log("[Fluxer] Ready"); return; }
     if (packet.t === "RESUMED") { this.attempts = 0; console.log("[Fluxer] Ready (session resumed)"); return; }
-    if (packet.t === "VOICE_STATE_UPDATE") { const uid = text(d.user_id), cid = text(d.channel_id); if (uid) cid ? this.memberVoice.set(uid, cid) : this.memberVoice.delete(uid); return; }
+    if (packet.t === "GUILD_CREATE") { this.replaceGuildVoice(d); return; }
+    if (packet.t === "GUILD_DELETE") { const guildId = text(d.id); if (guildId) this.memberVoice.delete(guildId); return; }
+    if (packet.t === "VOICE_STATE_UPDATE") { const guildId = text(d.guild_id), uid = text(d.user_id), cid = text(d.channel_id); if (guildId && uid) this.updateMemberVoice(guildId, uid, cid); return; }
     if (packet.t === "VOICE_SERVER_UPDATE") { const guildId = text(d.guild_id), channelId = text(d.channel_id), token = text(d.token), endpoint = text(d.endpoint), connectionId = text(d.connection_id); const waiter = guildId ? this.voiceWaiters.get(guildId) : undefined; if (waiter && channelId === waiter.channelId && token && endpoint && connectionId) { clearTimeout(waiter.timeout); this.voiceWaiters.delete(guildId!); waiter.resolve({ token, endpoint, connectionId }); } return; }
     if (packet.t === "MESSAGE_CREATE") void this.normalizeMessage(d);
   }
   private async normalizeMessage(message: Record<string, unknown>) {
     const content = text(message.content), channelId = text(message.channel_id), guildId = text(message.guild_id), author = record(message.author), userId = text(author?.id);
     if (!content || !channelId || !guildId || !userId || userId === this.selfId || author?.bot === true || !this.handler) return;
-    await this.handler({ guildId, channelId, userId, voiceChannelId: this.memberVoice.get(userId), reply: async (reply, components) => { await this.sendMessage(channelId, reply, components); } }, content);
+    await this.handler({ guildId, channelId, userId, voiceChannelId: this.memberVoice.get(guildId)?.get(userId), reply: async (reply, components) => { await this.sendMessage(channelId, reply, components); } }, content);
+  }
+  private replaceGuildVoice(guild: Record<string, unknown>) {
+    const guildId = text(guild.id); if (!guildId) return;
+    const voice = new Map<string, string>();
+    if (Array.isArray(guild.voice_states)) for (const value of guild.voice_states) {
+      const state = record(value), userId = text(state?.user_id), channelId = text(state?.channel_id);
+      if (userId && channelId) voice.set(userId, channelId);
+    }
+    this.memberVoice.set(guildId, voice);
+  }
+  private updateMemberVoice(guildId: string, userId: string, channelId?: string) {
+    const voice = this.memberVoice.get(guildId);
+    if (channelId) {
+      const current = voice ?? new Map<string, string>(); current.set(userId, channelId);
+      if (!voice) this.memberVoice.set(guildId, current);
+    } else {
+      voice?.delete(userId);
+      if (voice?.size === 0) this.memberVoice.delete(guildId);
+    }
   }
   private async sendMessage(channel: string, content: string, components?: unknown) {
     const body: Record<string, unknown> = { content }; if (components !== undefined) body.components = components;

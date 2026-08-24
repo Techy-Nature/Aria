@@ -28,6 +28,45 @@ test("Fluxer normalizes messages, ignores bots, and replies to source channel", 
   await contexts[0].reply("answer"); assert.equal(requests[0][0], "https://api.fluxer.app/v1/channels/c/messages"); assert.equal((requests[0][1]?.headers as Record<string,string>).Authorization, "Bot secret"); await adapter.stop();
 });
 
+test("Fluxer hydrates guild voice states and tracks moves and leaves", async () => {
+  const contexts: CommandContext[] = []; const socket = new FakeSocket();
+  const adapter = new FluxerAdapter("secret", fetch, () => socket as never);
+  await adapter.start(async ctx => { contexts.push(ctx); });
+  adapter.handleGatewayEvent({ op: 0, t: "READY", d: { session_id: "s", user: { id: "self" } } });
+  adapter.handleGatewayEvent({ op: 0, t: "GUILD_CREATE", d: { id: "guild", voice_states: [{ user_id: "listener", channel_id: "voice-1", connection_id: "connection" }] } });
+
+  const message = { op: 0, t: "MESSAGE_CREATE", d: { guild_id: "guild", channel_id: "text", content: "a!play song", author: { id: "listener" } } };
+  adapter.handleGatewayEvent(message);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(contexts.at(-1)?.voiceChannelId, "voice-1");
+
+  adapter.handleGatewayEvent({ op: 0, t: "VOICE_STATE_UPDATE", d: { guild_id: "guild", user_id: "listener", channel_id: "voice-2" } });
+  adapter.handleGatewayEvent(message);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(contexts.at(-1)?.voiceChannelId, "voice-2");
+
+  adapter.handleGatewayEvent({ op: 0, t: "VOICE_STATE_UPDATE", d: { guild_id: "guild", user_id: "listener", channel_id: null } });
+  adapter.handleGatewayEvent(message);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(contexts.at(-1)?.voiceChannelId, undefined);
+  await adapter.stop();
+});
+
+test("Fluxer rebuilds stale guild voice state on GUILD_CREATE and fresh READY", async () => {
+  const contexts: CommandContext[] = []; const socket = new FakeSocket();
+  const adapter = new FluxerAdapter("secret", fetch, () => socket as never);
+  await adapter.start(async ctx => { contexts.push(ctx); });
+  adapter.handleGatewayEvent({ op: 0, t: "READY", d: { session_id: "first", user: { id: "self" } } });
+  adapter.handleGatewayEvent({ op: 0, t: "GUILD_CREATE", d: { id: "guild", voice_states: [{ user_id: "listener", channel_id: "stale" }] } });
+  adapter.handleGatewayEvent({ op: 0, t: "GUILD_CREATE", d: { id: "guild", voice_states: [] } });
+  adapter.handleGatewayEvent({ op: 0, t: "VOICE_STATE_UPDATE", d: { guild_id: "guild", user_id: "listener", channel_id: "also-stale" } });
+  adapter.handleGatewayEvent({ op: 0, t: "READY", d: { session_id: "fresh", user: { id: "self" } } });
+  adapter.handleGatewayEvent({ op: 0, t: "MESSAGE_CREATE", d: { guild_id: "guild", channel_id: "text", content: "a!play song", author: { id: "listener" } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(contexts[0].voiceChannelId, undefined);
+  await adapter.stop();
+});
+
 test("Stoat normalizes server messages, ignores self, and replies to source channel", async () => {
   const requests: string[] = []; const socket = new FakeSocket(); const contexts: CommandContext[] = [];
   const adapter = new StoatAdapter("secret", async url => { requests.push(String(url)); return response(); }, () => socket as never); await adapter.start(async ctx => { contexts.push(ctx); }); socket.emit("open");
