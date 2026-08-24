@@ -14,7 +14,26 @@ npm install
 npm run dev
 ```
 
-Register a Fluxer OAuth application, add `http://localhost:3000/api/auth/fluxer/callback` as its redirect URI, and set `FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET`. Then open <http://localhost:3000>. At the terminal, try `a!play yellow submarine`, `a!queuelist`, or `a!skip`. For real YouTube search results, add a YouTube Data API v3 key as `YOUTUBE_API_KEY`; without one, Aria returns safe search-preview links.
+Register a Fluxer OAuth application, add `http://localhost:3000/api/auth/fluxer/callback` as its redirect URI, and set `FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET`. Then open <http://localhost:3000>. At the terminal, try `a!play sc: yellow submarine`, `a!queuelist`, or `a!skip`.
+
+## Media providers
+
+Provider behavior is deliberately split between stable search/queue metadata and playback-time resolution. This prevents an expiring signed stream from sitting in a queue or appearing in the dashboard.
+
+| Provider | Search | Playback |
+|---|---:|---:|
+| Direct HTTP(S) URL | No | Yes |
+| SoundCloud | Yes | Yes, public off-platform-streamable tracks |
+| YouTube | Yes | Not yet (metadata only) |
+| Pixabay | No* | Direct media URLs only |
+
+SoundCloud requires `SOUNDCLOUD_CLIENT_ID` and `SOUNDCLOUD_CLIENT_SECRET`. Create an application through SoundCloud, keep both values in deployment secrets, and use credentials authorized for its [official public API](https://developers.soundcloud.com/docs/api/guide). Aria obtains and caches an OAuth client-credentials token, resolves public track pages through the API, and requests the current track stream only when playback starts. It prefers `hls_aac_160_url`, falls back to `hls_aac_96_url`, and sends that temporary AAC HLS input directly to FFmpeg. Tokens, authorization headers, secrets, and signed HLS inputs never enter a `Track` or public player snapshot.
+
+YouTube search requires `YOUTUBE_API_KEY` and uses the official YouTube Data API. Results retain the video/playlist identity, canonical URL, channel, and artwork, but that API does not provide an audio stream. Aria therefore labels these results **search only** and reports playback as unsupported; it does not scrape pages, decipher signatures, or invoke an unofficial downloader.
+
+Pixabay's [official API documentation](https://pixabay.com/api/docs/) documents image and video search, not a supported music/audio API. Aria consequently has no native Pixabay provider and does not scrape its site or use internal endpoints. An actual authorized HTTP(S) audio URL can still use the direct provider.
+
+Examples: `a!play https://media.example/song.aac`, `a!play sc: song title`, `a!search soundcloud: song title`, and `a!search youtube: song title`. Plain `a!play song title` considers playback-capable search providers, while plain `a!search song title` can include metadata-only results.
 
 ## Commands
 
@@ -79,7 +98,7 @@ Fluxer joining follows its official gateway opcode 4 voice-state payload, includ
 
 Stoat uses the current native `POST /channels/:id/join_call` assignment and returned LiveKit URL/token, matching current [Revoice.js](https://www.npmjs.com/package/revoice.js) behavior. Aria uses `@livekit/rtc-node` directly rather than Revoice's bundled FFmpeg layer because this keeps one audited decoder, avoids Revoice's process-global signal handler/debug logging, and reuses Aria's existing bot authentication. A 403 produces a connect/speak permission error.
 
-The shared decoder accepts direct, authorized HTTP(S) media URLs and safely spawns `ffmpeg` with a fixed argv array (never a shell). It emits 48 kHz stereo signed 16-bit PCM into LiveKit. An awaited stream pump and Node high-water mark bound decoded PCM while LiveKit is slow; `-re` adds real-time input pacing. Pause/resume sends SIGSTOP/SIGCONT; replacement, stop, disconnect, and shutdown abort the pump and terminate the child so old frames cannot leak into a replacement track. `FFMPEG_PATH` can override the executable. YouTube Data API results are metadata/search links only: Aria does not scrape or circumvent YouTube delivery, so those links are rejected before Aria claims they were queued. Use a direct URL you are entitled to stream (for example an MP3, AAC, Ogg, FLAC, WAV, or HTTP radio resource supported by the installed FFmpeg).
+The shared decoder accepts provider-resolved, authorized HTTP(S) media URLs and safely spawns `ffmpeg` with a fixed argv array (never a shell). It emits 48 kHz stereo signed 16-bit PCM into LiveKit. An awaited stream pump and Node high-water mark bound decoded PCM while LiveKit is slow; `-re` adds real-time input pacing. Pause/resume sends SIGSTOP/SIGCONT; replacement, stop, disconnect, and shutdown abort the pump and terminate the child so old frames cannot leak into a replacement track. `FFMPEG_PATH` can override the executable. Use only media you are entitled to stream.
 
 ### Render requirements
 
@@ -95,7 +114,8 @@ Ephemeral voice credentials live only in method-local values and the LiveKit SDK
 
 * `bot/src/commands.ts` — prefix parser, aliases, validation, and user replies.
 * `bot/src/player.ts` — deterministic per-guild queues, history, loop modes, and controls.
-* `bot/src/search.ts` — links, previews, and YouTube API search.
+* `bot/src/sources/` — provider contract, detection/search routing, direct URLs, SoundCloud OAuth/API/HLS resolution, and YouTube metadata.
+* `bot/src/search.ts` — compatibility facade over the provider-neutral source manager.
 * `bot/src/server.ts` — authenticated JSON API and static dashboard host.
 * `bot/src/adapters/` — Fluxer and Stoat text gateway/REST adapters.
 * `bot/src/voice/` — shared coordinator/decoder and platform-native LiveKit transports.
