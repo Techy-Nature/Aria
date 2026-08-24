@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
+import { detectProvider, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
 import { MAX_PLAYLIST_PAGES, MAX_PLAYLIST_TRACKS, YouTubeProvider } from "./youtube.js";
 import { SourceManager } from "./manager.js";
 
@@ -87,10 +87,26 @@ test("real process wrapper selects audio-only, preserves ephemeral headers, and 
   assert.equal("track" in media, false); resolver.shutdown();
 });
 
-test("PO-token mode requests only the documented mweb extractor client and returns ephemeral media", async () => {
-  const path = await fakeYtDlp(`const i=process.argv.indexOf('--extractor-args');if(i<0||process.argv[i+1]!=='youtube:player_client=mweb'||process.argv.some(x=>x.toLowerCase().includes('cookie')))process.exit(9);console.log(JSON.stringify({url:'https://cdn/po-audio',acodec:'opus',vcodec:'none'}))`);
-  const resolver = new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true });
+test("PO-token mode passes separate fixed mweb and explicit custom BgUtils extractor arguments", async () => {
+  const script = "/opt/aria/bgutil/server/build/generate_once.js";
+  const path = await fakeYtDlp(`const values=process.argv.flatMap((x,i)=>x==='--extractor-args'?[process.argv[i+1]]:[]);if(JSON.stringify(values)!==JSON.stringify(['youtube:player_client=mweb','youtubepot-bgutilscript:script_path=${script}'])||process.argv.some(x=>x.toLowerCase().includes('cookie')))process.exit(9);console.log(JSON.stringify({url:'https://cdn/po-audio',acodec:'opus',vcodec:'none'}))`);
+  const resolver = new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true, bgutilScriptPath: script });
   assert.equal((await resolver.resolve("https://music.youtube.com/watch?v=x")).inputUrl, "https://cdn/po-audio");
+});
+
+test("provider detection requires the package, generator script, and Node runtime", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aria-bgutil-")); const script = join(dir, "generate_once.js"); await writeFile(script, "");
+  const ok = join(dir, "ok"); await writeFile(ok, "#!/bin/sh\nexit 0\n"); await chmod(ok, 0o755);
+  const bad = join(dir, "bad"); await writeFile(bad, "#!/bin/sh\nexit 1\n"); await chmod(bad, 0o755);
+  assert.equal(detectProvider(script, ok, ok), true);
+  assert.equal(detectProvider(script, bad, ok), false, "missing plugin");
+  assert.equal(detectProvider(join(dir, "missing.js"), ok, ok), false, "missing script");
+  assert.equal(detectProvider(script, ok, bad), false, "missing Node");
+});
+
+test("diagnostic sanitizer redacts tokens, visitor data, cookies, and signed URLs", () => {
+  const safe = sanitized("po_token=secret visitor_data=visitor Cookie=session Authorization=bearer https://media.example/signed?x=1");
+  assert.ok(!/secret|session|bearer|media\.example/.test(safe));
 });
 
 test("provider failure falls back exactly once without mweb or cookies", async () => {
@@ -100,6 +116,15 @@ test("provider failure falls back exactly once without mweb or cookies", async (
   assert.equal((await resolver.resolve("https://youtu.be/x")).inputUrl, "https://cdn/fallback");
   const invocations = (await import("node:fs/promises")).readFile(calls, "utf8").then(value => value.trim().split("\n").map(line => JSON.parse(line) as string[]));
   const args = await invocations; assert.equal(args.length, 2); assert.ok(args[0].includes("youtube:player_client=mweb")); assert.ok(!args[1].includes("--extractor-args")); assert.ok(args.flat().every(arg => !arg.toLowerCase().includes("cookie")));
+});
+
+test("BgUtils generation error spellings are provider failures and fall back once", async () => {
+  for (const message of ["failed to generate an integrity token", "GenerateIT failed", "provider returned error", "get_pot failed", "bgutil script failure"]) {
+    const dir = await mkdtemp(join(tmpdir(), "aria-bgutil-failure-")); const calls = join(dir, "calls");
+    const path = await fakeYtDlp(`const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},'x');if(process.argv.includes('--extractor-args')){console.error(${JSON.stringify(message)});process.exit(1)}console.log(JSON.stringify({url:'https://cdn/fallback',acodec:'opus',vcodec:'none'}))`);
+    assert.equal((await new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true }).resolve("https://youtu.be/x")).inputUrl, "https://cdn/fallback");
+    assert.equal(await (await import("node:fs/promises")).readFile(calls, "utf8").then(value => value.length), 2);
+  }
 });
 
 test("private videos do not fall back and bot failures hide token material", async () => {

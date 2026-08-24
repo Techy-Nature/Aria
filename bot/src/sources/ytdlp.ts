@@ -1,16 +1,18 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { isAbsolute } from "node:path";
+import { statSync } from "node:fs";
 import { UnplayableSourceError, ProviderUnavailableError } from "./types.js";
 
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"]);
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const BASE_ARGS = ["--ignore-config", "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download"];
-const PO_ARGS = ["--extractor-args", "youtube:player_client=mweb"];
+const DEFAULT_BGUTIL_SCRIPT_PATH = "/root/bgutil-ytdlp-pot-provider/server/build/generate_once.js";
 type Format = { url?: unknown; acodec?: unknown; vcodec?: unknown; abr?: unknown; tbr?: unknown; ext?: unknown; http_headers?: unknown };
 type Output = Format & { formats?: unknown; http_headers?: unknown };
 type FailureKind = "private" | "geo" | "bot" | "provider" | "timeout" | "generic";
 
 export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string> }
-export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean }
+export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string }
 
 class ResolutionFailure extends Error { constructor(readonly kind: FailureKind) { super(kind); } }
 
@@ -39,34 +41,41 @@ function classify(stderr: string): FailureKind {
   const detail = stderr.toLowerCase();
   if (/private video|video is private|video unavailable|has been removed|removed by/.test(detail)) return "private";
   if (/not available in your country|geo.?restrict|blocked in your country|region/.test(detail)) return "geo";
-  if (/po token provider|pot provider|token provider|failed to generate.*po.?token|po.?token.*(missing|unavailable|failed|error)/.test(detail)) return "provider";
+  if (/po token provider|pot provider|token provider|failed to generate (an )?integrity token|generateit|provider returned (an )?error|get_pot|bgutil script (failure|failed)|failed to generate.*po.?token|po.?token.*(missing|unavailable|failed|error)/.test(detail)) return "provider";
   if (/sign in to confirm|not a bot|bot.?challenge|login required|authentication required/.test(detail)) return "bot";
   return "generic";
 }
-function sanitized(stderr: string) {
+export function sanitized(stderr: string) {
   return stderr.replace(/https?:\/\/\S+/gi, "[URL]")
     .replace(/\b(po_?token|pot|token|visitor_?data|authorization|cookie)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
     .replace(/[A-Za-z0-9_-]{80,}/g, "[REDACTED]").trim().slice(-1000);
 }
-function detectProvider(): boolean {
-  // Package discovery is local-only and does not contact YouTube. yt-dlp loads this
-  // package through its standard plugin namespace on the next extraction.
-  const check = spawnSync("python3", ["-c", "import importlib.metadata as m; m.version('bgutil-ytdlp-pot-provider')"], { shell: false, stdio: "ignore", timeout: 3_000 });
-  return check.status === 0;
+function regularFile(path: string): boolean { try { return statSync(path).isFile(); } catch { return false; } }
+export function detectProvider(scriptPath: string, pythonPath = "python3", nodePath = "node"): boolean {
+  // These checks are deliberately local-only. Provider discovery with a URL would
+  // contact YouTube, and yt-dlp does not currently expose a URL-free provider list.
+  const plugin = spawnSync(pythonPath, ["-c", "import importlib.metadata as m; m.version('bgutil-ytdlp-pot-provider')"], { shell: false, stdio: "ignore", timeout: 3_000 }).status === 0;
+  const script = regularFile(scriptPath);
+  const node = spawnSync(nodePath, ["--version"], { shell: false, stdio: "ignore", timeout: 3_000 }).status === 0;
+  if (plugin) console.log("[Sources/yt-dlp] PO token plugin available"); else console.warn("[Sources/yt-dlp] BgUtils plugin missing");
+  if (script) console.log("[Sources/yt-dlp] BgUtils script available"); else console.warn("[Sources/yt-dlp] BgUtils script missing");
+  if (!node) console.warn("[Sources/yt-dlp] Node.js runtime missing");
+  return plugin && script && node;
 }
 
 export class YtDlpResolver {
   readonly executable: string; readonly available: boolean; readonly poTokenEnabled: boolean; readonly poTokenProviderAvailable: boolean;
-  private readonly timeoutMs: number; private readonly children = new Set<ChildProcess>();
+  private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly children = new Set<ChildProcess>();
   constructor(options: YtDlpOptions = {}) {
     this.executable = options.path ?? process.env.YTDLP_PATH ?? "yt-dlp"; this.timeoutMs = options.timeoutMs ?? 20_000;
+    this.bgutilScriptPath = options.bgutilScriptPath ?? process.env.BGUTIL_SCRIPT_PATH ?? DEFAULT_BGUTIL_SCRIPT_PATH;
+    if (!isAbsolute(this.bgutilScriptPath)) throw new Error("BGUTIL_SCRIPT_PATH must be an absolute path");
     this.available = options.available ?? spawnSync(this.executable, ["--version"], { shell: false, stdio: "ignore", timeout: 3_000 }).status === 0;
     this.poTokenEnabled = options.poTokenEnabled ?? enabled(process.env.YTDLP_PO_TOKEN_ENABLED);
-    this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider());
+    this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider(this.bgutilScriptPath, options.pythonPath, options.nodePath));
     if (this.available) console.log("[Sources/yt-dlp] available");
     else console.warn("[Sources/yt-dlp] unavailable");
-    if (this.poTokenEnabled && this.poTokenProviderAvailable) console.log("[Sources/yt-dlp] PO token provider available");
-    else if (this.poTokenEnabled) console.warn("[Sources/yt-dlp] PO token provider unavailable; using normal resolver");
+    if (this.poTokenEnabled && !this.poTokenProviderAvailable) console.warn("[Sources/yt-dlp] PO token provider unavailable; using normal resolver");
   }
   async resolve(input: string): Promise<YtDlpResult> {
     const url = validateYtDlpUrl(input);
@@ -78,13 +87,15 @@ export class YtDlpResolver {
         if (!(error instanceof ResolutionFailure)) throw error;
         if (error.kind === "private" || error.kind === "geo" || error.kind === "timeout") throw this.publicError(error.kind, true);
         if (error.kind !== "provider" && error.kind !== "bot") throw this.publicError(error.kind, true);
+        if (error.kind === "provider") console.warn("[Sources/yt-dlp] PO-token generation failed");
+        else console.warn("[Sources/yt-dlp] YouTube still returned bot challenge after PO token");
         poFailed = true;
       }
     } else if (this.poTokenEnabled) poFailed = true;
     try { return this.parse(await this.run(url, false)); }
     catch (error) {
       if (!(error instanceof ResolutionFailure)) throw error;
-      if (error.kind === "bot" && poFailed) throw new UnplayableSourceError("YouTube blocked playback from Aria's server. PO-token playback was unavailable or unsuccessful.");
+      if (error.kind === "bot" && poFailed) { console.warn("[Sources/yt-dlp] standard fallback also received bot challenge"); throw new UnplayableSourceError("YouTube blocked playback from Aria's server. PO-token playback was unavailable or unsuccessful."); }
       throw this.publicError(error.kind, false);
     }
   }
@@ -97,7 +108,7 @@ export class YtDlpResolver {
     return new UnplayableSourceError("I couldn't resolve that YouTube audio stream.");
   }
   private run(url: URL, poToken: boolean): Promise<string> {
-    const args = [...BASE_ARGS, ...(poToken ? PO_ARGS : []), url.toString()];
+    const args = [...BASE_ARGS, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
       let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
@@ -110,8 +121,11 @@ export class YtDlpResolver {
         if (timedOut) return finish(new ResolutionFailure("timeout"));
         if (outputExceeded) return finish(new ResolutionFailure("generic"));
         if (code === 0) return finish();
-        const safe = sanitized(stderr); if (safe) console.warn(`[Sources/yt-dlp] extraction failed (${poToken ? "PO token" : "standard"}): ${safe}`);
-        finish(new ResolutionFailure(classify(stderr)));
+        // Never emit raw stderr: even aggressive redaction can miss a new token or
+        // signed-URL spelling. Only the locally classified, fixed diagnostic is logged.
+        const kind = classify(stderr);
+        if (kind !== "provider" && kind !== "bot") console.warn(`[Sources/yt-dlp] extraction failed (${poToken ? "PO token" : "standard"}): ${kind}`);
+        finish(new ResolutionFailure(kind));
       });
     });
   }
