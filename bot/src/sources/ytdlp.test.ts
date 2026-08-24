@@ -9,7 +9,7 @@ import { SourceManager } from "./manager.js";
 
 async function fakeYtDlp(body: string) {
   const dir = await mkdtemp(join(tmpdir(), "aria-ytdlp-")); const path = join(dir, "yt-dlp");
-  await writeFile(path, `#!/usr/bin/env node\nif(process.argv.includes('--version')) console.log('test'); else ${body}\n`); await chmod(path, 0o755); return path;
+  await writeFile(path, `#!/usr/bin/env node\nif(process.argv.includes('--version')) console.log('test'); else { ${body} }\n`); await chmod(path, 0o755); return path;
 }
 
 test("yt-dlp URL allowlist accepts YouTube variants and rejects unsafe schemes/hosts", () => {
@@ -78,13 +78,44 @@ test("playlist import never stores more than the track limit", async () => {
 });
 
 test("real process wrapper selects audio-only, preserves ephemeral headers, and uses fixed safe argv", async () => {
-  const path = await fakeYtDlp(`if(!process.argv.includes('--no-playlist')||!process.argv.includes('--ignore-config')||process.argv.length!==8)process.exit(9);console.log(JSON.stringify({formats:[
+  const path = await fakeYtDlp(`if(!process.argv.includes('--no-playlist')||!process.argv.includes('--ignore-config')||process.argv.includes('--extractor-args')||process.argv.some(x=>x.includes('cookie')))process.exit(9);console.log(JSON.stringify({formats:[
     {url:'https://cdn/video',acodec:'aac',vcodec:'h264',tbr:999},
     {url:'https://cdn/audio',acodec:'opus',vcodec:'none',abr:128,http_headers:{'User-Agent':'Aria Test',Cookie:'secret'}}
   ], invoked:process.argv.slice(2)}))`);
   const resolver = new YtDlpResolver({ path, available: true }); const media = await resolver.resolve("https://youtube.com/watch?v=--exec");
   assert.equal(media.inputUrl, "https://cdn/audio"); assert.deepEqual(media.requestHeaders, { "User-Agent": "Aria Test", Cookie: "secret" });
   assert.equal("track" in media, false); resolver.shutdown();
+});
+
+test("PO-token mode requests only the documented mweb extractor client and returns ephemeral media", async () => {
+  const path = await fakeYtDlp(`const i=process.argv.indexOf('--extractor-args');if(i<0||process.argv[i+1]!=='youtube:player_client=mweb'||process.argv.some(x=>x.toLowerCase().includes('cookie')))process.exit(9);console.log(JSON.stringify({url:'https://cdn/po-audio',acodec:'opus',vcodec:'none'}))`);
+  const resolver = new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true });
+  assert.equal((await resolver.resolve("https://music.youtube.com/watch?v=x")).inputUrl, "https://cdn/po-audio");
+});
+
+test("provider failure falls back exactly once without mweb or cookies", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aria-ytdlp-calls-")); const calls = join(dir, "calls");
+  const path = await fakeYtDlp(`const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2))+'\\n');if(process.argv.includes('--extractor-args')){console.error('PO Token Provider unavailable token=secret-pot-value');process.exit(1)}console.log(JSON.stringify({url:'https://cdn/fallback',acodec:'opus',vcodec:'none'}))`);
+  const resolver = new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true });
+  assert.equal((await resolver.resolve("https://youtu.be/x")).inputUrl, "https://cdn/fallback");
+  const invocations = (await import("node:fs/promises")).readFile(calls, "utf8").then(value => value.trim().split("\n").map(line => JSON.parse(line) as string[]));
+  const args = await invocations; assert.equal(args.length, 2); assert.ok(args[0].includes("youtube:player_client=mweb")); assert.ok(!args[1].includes("--extractor-args")); assert.ok(args.flat().every(arg => !arg.toLowerCase().includes("cookie")));
+});
+
+test("private videos do not fall back and bot failures hide token material", async () => {
+  let path = await fakeYtDlp(`console.error('This video is private');process.exit(1)`);
+  let resolver = new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true });
+  await assert.rejects(resolver.resolve("https://youtu.be/x"), /unavailable or private/);
+  path = await fakeYtDlp(`console.error('Sign in to confirm you are not a bot po_token=VERY_SECRET_TOKEN_VALUE');process.exit(1)`);
+  resolver = new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true });
+  await assert.rejects(resolver.resolve("https://youtu.be/x"), error => error instanceof Error && /PO-token playback was unavailable or unsuccessful/.test(error.message) && !/SECRET|po_token/.test(error.message));
+});
+
+test("disabled or unavailable PO provider never adds extractor arguments", async () => {
+  for (const options of [{ poTokenEnabled: false, poTokenProviderAvailable: true }, { poTokenEnabled: true, poTokenProviderAvailable: false }]) {
+    const path = await fakeYtDlp(`if(process.argv.includes('--extractor-args'))process.exit(9);console.log(JSON.stringify({url:'https://cdn/normal',acodec:'opus',vcodec:'none'}))`);
+    assert.equal((await new YtDlpResolver({ path, available: true, ...options }).resolve("https://youtu.be/x")).inputUrl, "https://cdn/normal");
+  }
 });
 
 test("audio-containing format is a fallback and malformed JSON is contained", async () => {
