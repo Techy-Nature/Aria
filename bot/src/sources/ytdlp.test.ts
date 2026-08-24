@@ -4,7 +4,8 @@ import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
-import { YouTubeProvider } from "./youtube.js";
+import { MAX_PLAYLIST_PAGES, MAX_PLAYLIST_TRACKS, YouTubeProvider } from "./youtube.js";
+import { SourceManager } from "./manager.js";
 
 async function fakeYtDlp(body: string) {
   const dir = await mkdtemp(join(tmpdir(), "aria-ytdlp-")); const path = join(dir, "yt-dlp");
@@ -24,6 +25,25 @@ test("YouTube URLs normalize to stable video metadata without resolving", async 
   await assert.rejects(provider.fromUrl("https://youtube.com/playlist?list=PL1"), /YOUTUBE_API_KEY/);
 });
 
+test("watch and short URLs with list parameters remain single videos", async () => {
+  const provider = new YouTubeProvider("key", async () => { throw new Error("playlist API must not be called"); }, { available: true } as never);
+  for (const input of ["https://youtube.com/watch?v=abc&list=PL123", "https://music.youtube.com/watch?v=abc&list=PL123", "https://youtu.be/abc?list=PL123"]) {
+    const track = await provider.fromUrl(input); assert.ok(!Array.isArray(track)); assert.equal(track.providerId, "abc"); assert.equal(track.playlistId, undefined);
+  }
+});
+
+test("playable search filters playlist results before applying the limit", async () => {
+  let requestedType: string | null = null;
+  const fetcher: typeof fetch = async input => { requestedType = new URL(String(input)).searchParams.get("type"); return new Response(JSON.stringify({ items: [
+    { id: { playlistId: "playlist" }, snippet: { title: "Playlist", channelTitle: "Owner" } },
+    { id: { videoId: "video-a" }, snippet: { title: "Video A", channelTitle: "Artist" } },
+    { id: { videoId: "video-b" }, snippet: { title: "Video B", channelTitle: "Artist" } }
+  ] }), { status: 200 }); };
+  const provider = new YouTubeProvider("key", fetcher, { available: true } as never); const manager = new SourceManager([provider]);
+  const results = await manager.search("song title", 1, true); assert.equal(requestedType, "video"); assert.deepEqual(results.map(track => track.providerId), ["video-a"]);
+  const all = await manager.search("song title", 3); assert.equal(requestedType, "video,playlist"); assert.deepEqual(all.map(track => track.providerId), ["playlist", "video-a", "video-b"]);
+});
+
 test("YouTube playlist import follows every API page and creates stable playable tracks", async () => {
   const requests: URL[] = [];
   const fetcher: typeof fetch = async input => {
@@ -34,10 +54,27 @@ test("YouTube playlist import follows every API page and creates stable playable
     ] }), { status: 200 });
   };
   const provider = new YouTubeProvider("key", fetcher, { available: true, resolve: async () => ({ inputUrl: "https://cdn/audio" }), shutdown() {} } as never);
-  const tracks = await provider.fromUrl("https://www.youtube.com/watch?v=selected&list=PL_test"); assert.ok(Array.isArray(tracks));
+  const tracks = await provider.fromUrl("https://www.youtube.com/playlist?list=PL_test"); assert.ok(Array.isArray(tracks));
   assert.deepEqual(tracks.map(track => track.providerId), ["one", "two"]); assert.ok(tracks.every(track => track.playlistId === "PL_test" && track.playable));
   assert.equal(tracks[0].artist, "Artist"); assert.equal(tracks[0].url, "https://www.youtube.com/watch?v=one"); assert.equal(requests.length, 2);
   assert.equal(requests[0].searchParams.get("maxResults"), "50"); assert.equal(requests[1].searchParams.get("pageToken"), "next");
+});
+
+test("playlist import stops pagination at the page limit and excludes unavailable entries", async () => {
+  let calls = 0;
+  const fetcher: typeof fetch = async () => { calls++; return new Response(JSON.stringify({ nextPageToken: `page-${calls}`, items: [
+    { snippet: { title: "Private video", channelTitle: "Owner", resourceId: { videoId: `private-${calls}` } }, status: { privacyStatus: "private" } },
+    { snippet: { title: "Deleted video", channelTitle: "Owner", resourceId: { videoId: `deleted-${calls}` } }, status: { privacyStatus: "public" } },
+    { snippet: { title: `Usable ${calls}`, channelTitle: "Owner", resourceId: { videoId: `usable-${calls}` } }, status: { privacyStatus: "public" } }
+  ] }), { status: 200 }); };
+  const provider = new YouTubeProvider("key", fetcher, { available: true } as never); const tracks = await provider.fromUrl("https://youtube.com/playlist?list=PL_pages"); assert.ok(Array.isArray(tracks));
+  assert.equal(calls, MAX_PLAYLIST_PAGES); assert.equal(tracks.length, MAX_PLAYLIST_PAGES); assert.ok(tracks.every(track => track.title.startsWith("Usable")));
+});
+
+test("playlist import never stores more than the track limit", async () => {
+  let calls = 0; const items = Array.from({ length: MAX_PLAYLIST_TRACKS + 20 }, (_, index) => ({ snippet: { title: `Track ${index}`, channelTitle: "Owner", resourceId: { videoId: `video-${index}` } }, status: { privacyStatus: "public" } }));
+  const provider = new YouTubeProvider("key", async () => { calls++; return new Response(JSON.stringify({ nextPageToken: "must-not-follow", items }), { status: 200 }); }, { available: true } as never);
+  const tracks = await provider.fromUrl("https://youtube.com/playlist?list=PL_tracks"); assert.ok(Array.isArray(tracks)); assert.equal(tracks.length, MAX_PLAYLIST_TRACKS); assert.equal(calls, 1);
 });
 
 test("real process wrapper selects audio-only, preserves ephemeral headers, and uses fixed safe argv", async () => {

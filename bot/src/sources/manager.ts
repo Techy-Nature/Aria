@@ -13,8 +13,8 @@ export class SourceManager {
     const urlProvider = this.detect(query); if (urlProvider?.fromUrl) { const found = await urlProvider.fromUrl(query); return Array.isArray(found) ? found : [found]; }
     if (/^[a-z][a-z0-9+.-]*:/i.test(query) || /^https?:\/\//i.test(query)) throw new UnplayableSourceError("only supported HTTP(S) media and provider URLs are allowed.");
     const parsed = this.parsed(query); const providers = this.providers.filter(p => p.search && (!parsed.provider || p.id === parsed.provider) && (!playableOnly || p.supportsPlayback));
-    const settled = await Promise.allSettled(providers.map(p => p.search!(parsed.query, limit)));
-    const results = settled.flatMap(x => x.status === "fulfilled" ? x.value : []); if (!results.length && settled.some(x => x.status === "rejected")) throw (settled.find(x => x.status === "rejected") as PromiseRejectedResult).reason;
+    const settled = await Promise.allSettled(providers.map(p => p.search!(parsed.query, limit, playableOnly)));
+    const results = settled.flatMap(x => x.status === "fulfilled" ? x.value : []).filter(track => !playableOnly || track.playable !== false); if (!results.length && settled.some(x => x.status === "rejected")) throw (settled.find(x => x.status === "rejected") as PromiseRejectedResult).reason;
     return results.slice(0, limit);
   }
   async resolve(track: Track, positionSeconds = 0) { const provider = track.provider ? this.providers.find(x => x.id === track.provider) : this.detect(track.url); if (!provider) throw new UnplayableSourceError("this result does not contain a supported playable media URL."); return provider.resolve(track, positionSeconds); }

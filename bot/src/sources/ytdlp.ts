@@ -43,14 +43,15 @@ export class YtDlpResolver {
     const args = ["--ignore-config", "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download", url.toString()];
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(this.executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
-      let stdout = "", stderr = "", timedOut = false, settled = false;
+      let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
       const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); this.children.delete(child); error ? reject(error) : resolve(stdout); };
       const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 1_000).unref(); }, this.timeoutMs);
-      child.stdout.on("data", chunk => { stdout += chunk; if (Buffer.byteLength(stdout) > MAX_OUTPUT) { child.kill("SIGTERM"); finish(new Error("yt-dlp output exceeded the safe limit")); } });
+      child.stdout.on("data", chunk => { if (outputExceeded) return; stdout += chunk; if (Buffer.byteLength(stdout) > MAX_OUTPUT) { outputExceeded = true; stdout = ""; child.stdout.destroy(); child.kill("SIGTERM"); setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 1_000).unref(); } });
       child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
       child.once("error", error => finish((error as NodeJS.ErrnoException).code === "ENOENT" ? new ProviderUnavailableError("YouTube playback is unavailable because yt-dlp is not installed.") : error));
       child.once("close", code => {
         if (timedOut) return finish(new UnplayableSourceError("YouTube took too long to respond."));
+        if (outputExceeded) return finish(new UnplayableSourceError("I couldn't resolve that YouTube audio stream."));
         if (code === 0) return finish();
         const detail = stderr.toLowerCase();
         if (/private|unavailable|removed/.test(detail)) return finish(new UnplayableSourceError("That YouTube video is unavailable or private."));
