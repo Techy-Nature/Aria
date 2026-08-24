@@ -2,7 +2,7 @@
 
 Aria is a TypeScript music-bot core and JavaScript web player for **Stoat** and **Fluxer**. Its default prefix is `a!`; every server can change its own prefix and search/queue defaults. The core deliberately separates platform gateway/voice transport from commands so the same queue behaves identically on both services.
 
-> **Integration status:** the command engine, dashboard, Fluxer OAuth login, and Fluxer/Stoat text gateway adapters are implemented. Voice/audio transport is deliberately not implemented yet; queue commands update Aria's player state but do not play audio.
+> **Integration status:** text and voice are implemented for Fluxer and Stoat. Voice uses each service's current LiveKit assignment flow and a shared FFmpeg decoder; console mode remains intentionally voice-free.
 
 ## Quick start
 
@@ -69,7 +69,27 @@ Fluxer uses an unprefixed token in gateway `IDENTIFY`/`RESUME` payloads and `Aut
 
 Stoat connects to event protocol v1 JSON, authenticates with the token, sends 30-second Ping events, and uses `X-Bot-Token` for REST. Stoat self-user identification deliberately follows the official client's Ready handler: [`src/events/v1.ts`](https://github.com/stoatchat/javascript-client-sdk/blob/main/src/events/v1.ts) assigns the Ready user whose `relationship` is `User` as the current session user, and the current API schema defines that value as the user's relationship to themselves. Connection authentication and Ping behavior follow [`src/events/EventClient.ts`](https://github.com/stoatchat/javascript-client-sdk/blob/main/src/events/EventClient.ts).
 
-The adapters cache gateway voice-state events when supplied, so `voiceChannelId` is best-effort and may be undefined until the relevant state has been observed. Voice/audio playback remains future work. Stoat DMs are ignored because they have no server ID; Fluxer messages from bots and Stoat webhook messages are ignored. For multi-process deployment, replace the in-memory `SettingsStore` with durable shared storage.
+The adapters cache gateway voice-state events when supplied, so `voiceChannelId` is best-effort and may be undefined until the relevant state has been observed. Stoat DMs are ignored because they have no server ID; Fluxer messages from bots and Stoat webhook messages are ignored. For multi-process deployment, replace the in-memory `SettingsStore` with durable shared storage.
+
+## Voice and audio
+
+`PlaybackCoordinator` observes `PlayerManager` intent and owns no queue rules. A separate playable-source resolver distinguishes metadata links from decoder inputs before queueing, and a guild feedback sink reports safe connection/decoder failures to the originating text channel. Per-guild transport sessions isolate LiveKit rooms, FFmpeg decoders, pause state, and playback generations. Generation checks discard EOF from a manually stopped or superseded decoder, preventing double advances. `stop` tears down the decoder, LiveKit room, and platform signaling; process shutdown tears down every guild.
+
+Fluxer joining follows its official gateway opcode 4 voice-state payload, including `connection_id`, then consumes `VOICE_SERVER_UPDATE` (`endpoint`, ephemeral `token`, and `connection_id`) and publishes PCM audio with the official LiveKit Node SDK. The implementation was checked against [`GatewayConstants.ts`](https://github.com/fluxerapp/fluxer/blob/main/packages/constants/src/GatewayConstants.ts), [`VoiceChannelConnector.tsx`](https://github.com/fluxerapp/fluxer/blob/main/fluxer_app/src/features/voice/engine/VoiceChannelConnector.tsx), [`GatewayVoiceTypes.ts`](https://github.com/fluxerapp/fluxer/blob/main/fluxer_app/src/features/gateway/types/GatewayVoiceTypes.ts), and [`VoiceServerUpdate.ts`](https://github.com/fluxerapp/fluxer/blob/main/fluxer_app/src/features/voice/events/VoiceServerUpdate.ts). Connect/Speak denial is surfaced by Fluxer's `VOICE_PERMISSION_DENIED` gateway error rather than using Discord RTP.
+
+Stoat uses the current native `POST /channels/:id/join_call` assignment and returned LiveKit URL/token, matching current [Revoice.js](https://www.npmjs.com/package/revoice.js) behavior. Aria uses `@livekit/rtc-node` directly rather than Revoice's bundled FFmpeg layer because this keeps one audited decoder, avoids Revoice's process-global signal handler/debug logging, and reuses Aria's existing bot authentication. A 403 produces a connect/speak permission error.
+
+The shared decoder accepts direct, authorized HTTP(S) media URLs and safely spawns `ffmpeg` with a fixed argv array (never a shell). It emits 48 kHz stereo signed 16-bit PCM into LiveKit. An awaited stream pump and Node high-water mark bound decoded PCM while LiveKit is slow; `-re` adds real-time input pacing. Pause/resume sends SIGSTOP/SIGCONT; replacement, stop, disconnect, and shutdown abort the pump and terminate the child so old frames cannot leak into a replacement track. `FFMPEG_PATH` can override the executable. YouTube Data API results are metadata/search links only: Aria does not scrape or circumvent YouTube delivery, so those links are rejected before Aria claims they were queued. Use a direct URL you are entitled to stream (for example an MP3, AAC, Ogg, FLAC, WAV, or HTTP radio resource supported by the installed FFmpeg).
+
+### Render requirements
+
+Use a Render **Docker** service or install FFmpeg in the native service build image. For Docker, install the distro `ffmpeg` package and leave `FFMPEG_PATH` unset; for a custom location set it to the absolute executable path. Do not commit an FFmpeg binary. Voice needs a continuously running instance and outbound HTTPS/WebSocket/WebRTC/UDP connectivity. A free service may spin down, restart, throttle CPU, or lack stable UDP, interrupting continuous voice; use an always-on instance for reliable playback. No Lavalink or additional hosted service is required.
+
+### Deployment smoke tests
+
+For Fluxer, set `ARIA_PLATFORM=fluxer`, deploy, join a voice channel, and run `a!play https://your-authorized-host/example.mp3`. Confirm join/audio, `a!pause` twice, `a!skip`, and `a!stop`; finally search Render logs and confirm that no LiveKit token or signed media URL appears. Repeat with `ARIA_PLATFORM=stoat`. Also confirm the bot has the platform's connect/speak permissions in the target channel. Test only sources you are authorized to transmit.
+
+Ephemeral voice credentials live only in method-local values and the LiveKit SDK. They are never added to player state, API responses, or logs. Logs intentionally print track titles but not source URLs, authorization headers, bot tokens, or LiveKit tokens.
 
 ## Architecture
 
@@ -78,6 +98,7 @@ The adapters cache gateway voice-state events when supplied, so `voiceChannelId`
 * `bot/src/search.ts` — links, previews, and YouTube API search.
 * `bot/src/server.ts` — authenticated JSON API and static dashboard host.
 * `bot/src/adapters/` — Fluxer and Stoat text gateway/REST adapters.
+* `bot/src/voice/` — shared coordinator/decoder and platform-native LiveKit transports.
 * `bot/src/platform.ts` — local console adapter and adapter exports.
 * `dashboard/` — dependency-free GitHub Pages compatible player. See [dashboard documentation](dashboard/DASHBOARD_README.md).
 

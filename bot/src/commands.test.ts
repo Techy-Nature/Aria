@@ -43,3 +43,22 @@ test("help lists every command with aliases and the server's current settings", 
   assert.match(replies[0], /Current defaults: prefix `!`, 7 search results, 12 queue entries\./);
   assert.match(replies[0], /`!pause` \(`ps`\)/);
 });
+
+test("play requires the caller to join a known voice channel", async () => {
+  const router = new CommandRouter(new SettingsStore(), new PlayerManager(), new SearchService());
+  const replies: string[] = [];
+  await router.handle({ guildId: "guild", channelId: "text", userId: "user", reply: async message => { replies.push(message); } }, "a!play https://media.example/song.mp3");
+  assert.deepEqual(replies, ["Join a voice channel first."]);
+});
+
+test("metadata-only search is rejected before play is reported successful", async () => {
+  const players = new PlayerManager(); const router = new CommandRouter(new SettingsStore(), players, new SearchService("")); const replies: string[] = [];
+  await router.handle({ guildId: "guild", channelId: "text", userId: "user", voiceChannelId: "voice", reply: async message => { replies.push(message); } }, "a!play Yellow Submarine");
+  assert.match(replies[0], /metadata-only.*direct media URL/i); assert.equal(players.get("guild").queue.length, 0);
+});
+
+test("a direct HTTP media URL is accepted into voice playback state", async () => {
+  const players = new PlayerManager(); const router = new CommandRouter(new SettingsStore(), players, new SearchService()); const replies: string[] = [];
+  await router.handle({ guildId: "guild", channelId: "text", userId: "user", voiceChannelId: "voice", reply: async message => { replies.push(message); } }, "a!play https://media.example/song.mp3");
+  assert.match(replies[0], /^Queued:/); assert.equal(players.get("guild").queue[0].url, "https://media.example/song.mp3"); assert.equal(players.get("guild").voiceChannelId, "voice");
+});
