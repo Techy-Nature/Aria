@@ -90,6 +90,17 @@ ARIA_TOKEN=<Stoat bot token>
 ARIA_PREFIX=a!
 ```
 
+To run on Fluxer and Stoat at the same time from one process, use:
+
+```env
+ARIA_PLATFORM=both
+ARIA_FLUXER_TOKEN=<Fluxer bot token>
+ARIA_STOAT_TOKEN=<Stoat bot token>
+ARIA_PREFIX=a!
+```
+
+In `both` mode each server's queue, settings, and voice session are kept separate by platform, so a Fluxer guild and a Stoat server never share state even if their ids match. `ARIA_TOKEN` is ignored in this mode.
+
 Use `ARIA_PLATFORM=console` (or omit it) for local terminal development. Selecting Fluxer or Stoat without `ARIA_TOKEN` intentionally fails startup rather than starting an offline console bot. Never expose the token in logs.
 
 `ARIA_TOKEN` authenticates the **chat bot connection**. It is unrelated to `FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET`, which remain the OAuth application credentials used for **dashboard user login**. Set `PUBLIC_URL` to the backend's public origin and `DASHBOARD_URL` to the dashboard origin; the OAuth callback is `<PUBLIC_URL>/api/auth/fluxer/callback`.
