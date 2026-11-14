@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { Readable } from "node:stream";
 import { AudioFrame, type AudioSource as LiveKitAudioSource } from "@livekit/rtc-node";
 import type { AudioSource } from "./types.js";
@@ -62,10 +62,11 @@ export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSou
   // No -re: decoding ahead lets LiveKit's queue hold a playout buffer, so a
   // slow network read or a CPU pause no longer starves the voice track.
   // Reconnect options keep long HTTP/HLS streams alive across brief drops.
-  const args = ["-hide_banner", "-loglevel", "warning", "-nostdin",
-    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5"];
+  const piped = source.inputCommand;
+  const args = ["-hide_banner", "-loglevel", "warning"];
+  if (!piped) args.push("-nostdin", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5");
   if ((source.positionSeconds ?? 0) > 0) args.push("-ss", String(source.positionSeconds));
-  if (source.requestHeaders && Object.keys(source.requestHeaders).length) {
+  if (!piped && source.requestHeaders && Object.keys(source.requestHeaders).length) {
     // Values originate only in a provider response. Reject line breaks so a
     // malformed extractor response cannot inject additional protocol headers.
     const headers = Object.entries(source.requestHeaders)
@@ -73,10 +74,23 @@ export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSou
       .map(([name, value]) => `${name}: ${value}\r\n`).join("");
     if (headers) args.push("-headers", headers);
   }
-  args.push("-i", source.inputUrl, "-vn", "-ac", String(PCM_CHANNELS), "-ar", String(PCM_SAMPLE_RATE), "-f", "s16le", "pipe:1");
-  const child = spawn(process.env.FFMPEG_PATH ?? "ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+  args.push("-i", piped ? "pipe:0" : source.inputUrl, "-vn", "-ac", String(PCM_CHANNELS), "-ar", String(PCM_SAMPLE_RATE), "-f", "s16le", "pipe:1");
+  const child = spawn(process.env.FFMPEG_PATH ?? "ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+  if (!piped) child.stdin.end();
   const abort = new AbortController(); let stderr = "", manual = false;
   child.stderr.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-4096); });
+  let feeder: ChildProcess | undefined;
+  if (piped) {
+    feeder = spawn(piped.command, piped.args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    feeder.stderr?.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-4096); });
+    feeder.once("error", error => { stderr += `\ninput process failed: ${error.message}`; piped.cleanup?.(); child.stdin.destroy(); });
+    feeder.once("exit", () => piped.cleanup?.());
+    // EPIPE when ffmpeg exits first (stop/skip) is expected, not a failure.
+    child.stdin.on("error", () => {}); feeder.stdout?.on("error", () => {});
+    feeder.stdout?.pipe(child.stdin);
+  }
+  const killFeeder = () => { if (feeder && feeder.exitCode === null) { feeder.kill("SIGCONT"); feeder.kill("SIGTERM"); } };
+  child.once("close", killFeeder);
   const pumping = pumpPcm(child.stdout, sink, abort.signal);
   const done = new Promise<void>((resolve, reject) => {
     child.once("error", reject);
@@ -89,6 +103,7 @@ export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSou
     const clear = () => sink.clearQueue();
     void pumping.then(clear, clear);
     if (child.exitCode === null) { child.kill("SIGCONT"); child.kill("SIGTERM"); }
+    killFeeder();
   };
   // Pausing also drops the playout buffer so audio stops immediately rather than
   // after the queued second plays out. At most that buffer is skipped on resume.

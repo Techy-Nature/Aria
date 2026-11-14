@@ -4,6 +4,13 @@ export interface AudioSource {
   track: Track; inputUrl: string; positionSeconds?: number;
   /** Playback-only headers supplied by a trusted resolver; never part of Track/player state. */
   requestHeaders?: Record<string, string>;
+  /**
+   * Optional process that writes the media bytes to stdout. When present the
+   * decoder reads from it instead of fetching inputUrl itself (yt-dlp downloads
+   * YouTube in ranged chunks with the right headers; a single ffmpeg GET is
+   * often refused with 403). cleanup runs once the process is finished.
+   */
+  inputCommand?: { command: string; args: string[]; cleanup?: () => void };
 }
 export type PlaybackEvent = { guildId: string; generation: number; type: "ended" | "error"; error?: Error };
 export interface VoiceTransport {
