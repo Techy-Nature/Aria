@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectProvider, errorSummary, jsRuntimeArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
+import { detectProvider, errorSummary, jsRuntimeArgs, proxyArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
 import { MAX_PLAYLIST_PAGES, MAX_PLAYLIST_TRACKS, YouTubeProvider } from "./youtube.js";
 import { SourceManager } from "./manager.js";
 
@@ -181,4 +181,19 @@ test("error summary keeps only the redacted final ERROR line", () => {
   const summary = errorSummary("[youtube] x: Downloading\nWARNING: n challenge solving failed\nERROR: [youtube] x: Signature failed https://rr1.example/videoplayback?sig=abc po_token=SECRET");
   assert.ok(summary?.startsWith("[youtube] x: Signature failed")); assert.ok(!/SECRET|rr1\.example/.test(summary ?? ""));
   assert.equal(errorSummary("WARNING: only a warning"), undefined);
+});
+
+test("YTDLP_PROXY is validated and applied to extraction and the media download", async () => {
+  assert.deepEqual(proxyArgs(undefined), []); assert.deepEqual(proxyArgs(" "), []);
+  assert.deepEqual(proxyArgs("socks5h://127.0.0.1:1055"), ["--proxy", "socks5h://127.0.0.1:1055"]);
+  assert.throws(() => proxyArgs("ftp://x"), /must use/); assert.throws(() => proxyArgs("not a url"), /proxy URL/);
+  const path = await fakeYtDlp(`const i=process.argv.indexOf('--proxy');if(i<0||process.argv[i+1]!=='http://u:p@home:8080')process.exit(9);console.log(JSON.stringify({formats:[{format_id:'251',url:'https://cdn/a',acodec:'opus',vcodec:'none'}]}))`);
+  const result = await new YtDlpResolver({ path, available: true, proxy: "http://u:p@home:8080" }).resolve("https://youtu.be/x");
+  const args = result.inputCommand!.args; const i = args.indexOf("--proxy");
+  assert.equal(args[i + 1], "http://u:p@home:8080"); assert.ok(args.includes("--load-info-json")); result.inputCommand!.cleanup();
+});
+
+test("proxy credentials are redacted from diagnostics", () => {
+  const safe = sanitized("ERROR: Unable to connect to proxy socks5h://alice:hunter2@100.64.0.1:1055");
+  assert.ok(!/hunter2|alice/.test(safe));
 });

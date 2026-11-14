@@ -39,6 +39,12 @@ Set `YTDLP_PO_TOKEN_ENABLED=true` to make anonymous proof-of-origin-token playba
 
 The Docker image enables this mode by default. It pins and installs yt-dlp and the provider's Python plugin from PyPI at build time, then checks out the matching tagged BgUtils generation script and builds it with the already-present Node runtime at the provider's documented default location. Native/non-Docker installations may leave the variable unset for standard yt-dlp behavior, or install both provider components according to the provider documentation before enabling it. YouTube actively changes its enforcement, and a PO token cannot guarantee that a challenged server IP will work; maintainers may need to update the pinned yt-dlp/provider versions after reviewing upstream releases. Authenticated, private, age-gated, geo-restricted, and DRM-protected media may remain unavailable.
 
+### Routing YouTube through a home connection
+
+If YouTube blocks your host's datacenter IP, set `YTDLP_PROXY` (for example `http://user:pass@host:port` or `socks5h://127.0.0.1:1055`). Every yt-dlp request, both extraction and the media download, then uses it; voice and chat traffic do not. Proxy credentials are redacted from logs.
+
+The Docker image can do this with [Tailscale](https://tailscale.com) and no port forwarding: run Tailscale on a home computer and enable it as an **exit node**, then set `TS_AUTHKEY` (an ephemeral, reusable auth key) and `TS_EXIT_NODE` (that computer's Tailscale name or `100.x` address). `scripts/start.sh` starts Tailscale in userspace mode with a local SOCKS5 proxy and sets `YTDLP_PROXY=socks5h://127.0.0.1:1055` automatically. If Tailscale cannot connect, Aria still starts without the proxy. `TS_HOSTNAME` (default `aria-railway`) names the container in your tailnet.
+
 Aria currently uses BgUtils **script mode**. Upstream also offers a simpler, faster HTTP mode for repeated or high-concurrency requests (`youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416`), while script mode starts Node for each yt-dlp invocation. HTTP mode is not launched by this release: adopting it later requires supervised lifecycle management and binding port 4416 only to localhost, never publishing it publicly.
 
 Pixabay's [official API documentation](https://pixabay.com/api/docs/) documents image and video search, not a supported music/audio API. Aria consequently has no native Pixabay provider and does not scrape its site or use internal endpoints. An actual authorized HTTP(S) audio URL can still use the direct provider.

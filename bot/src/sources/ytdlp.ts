@@ -14,7 +14,7 @@ type Output = Format & { formats?: unknown; http_headers?: unknown };
 type FailureKind = "private" | "geo" | "bot" | "provider" | "timeout" | "generic";
 
 export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string>; inputCommand?: { command: string; args: string[]; cleanup: () => void } }
-export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string }
+export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string; proxy?: string }
 
 class ResolutionFailure extends Error { constructor(readonly kind: FailureKind) { super(kind); } }
 
@@ -59,13 +59,25 @@ export function jsRuntimeArgs(value: string | undefined): string[] {
   if (!/^[A-Za-z0-9_.:/,-]+$/.test(runtime)) throw new Error("YTDLP_JS_RUNTIMES contains unsupported characters");
   return ["--js-runtimes", runtime];
 }
+/**
+ * Optional proxy for every YouTube request yt-dlp makes (extraction and the
+ * media download, which must come from the same IP). Used to send YouTube
+ * traffic through a home connection, e.g. Tailscale's SOCKS5 proxy.
+ */
+export function proxyArgs(value: string | undefined): string[] {
+  const proxy = value?.trim();
+  if (!proxy) return [];
+  let url: URL; try { url = new URL(proxy); } catch { throw new Error("YTDLP_PROXY must be a proxy URL such as socks5h://127.0.0.1:1055"); }
+  if (!["http:", "https:", "socks4:", "socks4a:", "socks5:", "socks5h:"].includes(url.protocol) || /\s/.test(proxy)) throw new Error("YTDLP_PROXY must use http, https, socks4, socks4a, socks5 or socks5h");
+  return ["--proxy", proxy];
+}
 /** The final yt-dlp ERROR line, redacted, for operators to diagnose failures. */
 export function errorSummary(stderr: string): string | undefined {
   const line = stderr.split(/\r?\n/).reverse().find(item => /\bERROR:/.test(item));
   return line ? sanitized(line.replace(/^.*?ERROR:\s*/, "")).slice(0, 300) : undefined;
 }
 export function sanitized(stderr: string) {
-  return stderr.replace(/https?:\/\/\S+/gi, "[URL]")
+  return stderr.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@").replace(/https?:\/\/\S+/gi, "[URL]")
     .replace(/\b(po_?token|pot|token|visitor_?data|authorization|cookie)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
     .replace(/[A-Za-z0-9_-]{80,}/g, "[REDACTED]").trim().slice(-1000);
 }
@@ -84,16 +96,18 @@ export function detectProvider(scriptPath: string, pythonPath = "python3", nodeP
 
 export class YtDlpResolver {
   readonly executable: string; readonly available: boolean; readonly poTokenEnabled: boolean; readonly poTokenProviderAvailable: boolean;
-  private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly jsRuntimeArgs: string[]; private readonly children = new Set<ChildProcess>();
+  private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly jsRuntimeArgs: string[]; private readonly proxyArgs: string[]; private readonly children = new Set<ChildProcess>();
   constructor(options: YtDlpOptions = {}) {
     this.executable = options.path ?? process.env.YTDLP_PATH ?? "yt-dlp"; this.timeoutMs = options.timeoutMs ?? 20_000;
     this.bgutilScriptPath = options.bgutilScriptPath ?? process.env.BGUTIL_SCRIPT_PATH ?? DEFAULT_BGUTIL_SCRIPT_PATH;
     if (!isAbsolute(this.bgutilScriptPath)) throw new Error("BGUTIL_SCRIPT_PATH must be an absolute path");
     this.jsRuntimeArgs = jsRuntimeArgs(options.jsRuntimes ?? process.env.YTDLP_JS_RUNTIMES);
+    this.proxyArgs = proxyArgs(options.proxy ?? process.env.YTDLP_PROXY);
     this.available = options.available ?? spawnSync(this.executable, ["--version"], { shell: false, stdio: "ignore", timeout: 3_000 }).status === 0;
     this.poTokenEnabled = options.poTokenEnabled ?? enabled(process.env.YTDLP_PO_TOKEN_ENABLED);
     this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider(this.bgutilScriptPath, options.pythonPath, options.nodePath));
     if (this.available) console.log("[Sources/yt-dlp] available");
+    if (this.proxyArgs.length) console.log("[Sources/yt-dlp] routing YouTube through YTDLP_PROXY");
     else console.warn("[Sources/yt-dlp] unavailable");
     if (this.poTokenEnabled && !this.poTokenProviderAvailable) console.warn("[Sources/yt-dlp] PO token provider unavailable; using normal resolver");
   }
@@ -130,7 +144,7 @@ export class YtDlpResolver {
     return new UnplayableSourceError("I couldn't resolve that YouTube audio stream.");
   }
   private run(url: URL, poToken: boolean): Promise<string> {
-    const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
+    const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...this.proxyArgs, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
       let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
@@ -170,7 +184,7 @@ export class YtDlpResolver {
     writeFileSync(file, infoJson, { mode: 0o600 });
     let cleaned = false;
     const cleanup = () => { if (cleaned) return; cleaned = true; rmSync(dir, { recursive: true, force: true }); };
-    const args = ["--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-part", "--no-cache-dir", "--load-info-json", file, "-f", formatId, "-o", "-"];
+    const args = ["--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-part", "--no-cache-dir", ...this.proxyArgs, "--load-info-json", file, "-f", formatId, "-o", "-"];
     return { command: this.executable, args, cleanup };
   }
   shutdown() { for (const child of this.children) if (child.exitCode === null) child.kill("SIGTERM"); this.children.clear(); }
