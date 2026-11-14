@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectProvider, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
+import { detectProvider, errorSummary, jsRuntimeArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
 import { MAX_PLAYLIST_PAGES, MAX_PLAYLIST_TRACKS, YouTubeProvider } from "./youtube.js";
 import { SourceManager } from "./manager.js";
 
@@ -159,4 +159,26 @@ test("missing and private media errors are user-friendly", async () => {
   const missing = new YtDlpResolver({ path: "/definitely/missing/yt-dlp", available: true }); await assert.rejects(missing.resolve("https://youtu.be/x"), /not installed/);
   const privateVideo = await fakeYtDlp(`console.error('This video is private');process.exit(1)`);
   await assert.rejects(new YtDlpResolver({ path: privateVideo, available: true }).resolve("https://youtu.be/x"), /unavailable or private/);
+});
+
+test("unclassified PO-token failures fall back to the standard resolver once", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aria-ytdlp-generic-")); const calls = join(dir, "calls");
+  const path = await fakeYtDlp(`const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(calls)},'x');if(process.argv.includes('--extractor-args')){console.error('ERROR: [youtube] x: Requested format is not available');process.exit(1)}console.log(JSON.stringify({url:'https://cdn/fallback',acodec:'opus',vcodec:'none'}))`);
+  assert.equal((await new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true }).resolve("https://youtu.be/x")).inputUrl, "https://cdn/fallback");
+  assert.equal(await (await import("node:fs/promises")).readFile(calls, "utf8").then(value => value.length), 2);
+});
+
+test("Node.js is passed as the yt-dlp JavaScript runtime by default", async () => {
+  assert.deepEqual(jsRuntimeArgs(undefined), ["--js-runtimes", "node"]);
+  assert.deepEqual(jsRuntimeArgs("deno"), ["--js-runtimes", "deno"]);
+  assert.deepEqual(jsRuntimeArgs("none"), []); assert.deepEqual(jsRuntimeArgs(""), []);
+  assert.throws(() => jsRuntimeArgs("node; rm -rf /"), /unsupported characters/);
+  const path = await fakeYtDlp(`const i=process.argv.indexOf('--js-runtimes');if(i<0||process.argv[i+1]!=='node')process.exit(9);console.log(JSON.stringify({url:'https://cdn/js',acodec:'opus',vcodec:'none'}))`);
+  assert.equal((await new YtDlpResolver({ path, available: true }).resolve("https://youtu.be/x")).inputUrl, "https://cdn/js");
+});
+
+test("error summary keeps only the redacted final ERROR line", () => {
+  const summary = errorSummary("[youtube] x: Downloading\nWARNING: n challenge solving failed\nERROR: [youtube] x: Signature failed https://rr1.example/videoplayback?sig=abc po_token=SECRET");
+  assert.ok(summary?.startsWith("[youtube] x: Signature failed")); assert.ok(!/SECRET|rr1\.example/.test(summary ?? ""));
+  assert.equal(errorSummary("WARNING: only a warning"), undefined);
 });
