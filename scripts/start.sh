@@ -18,13 +18,18 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
   i=0
   while [ ! -S "$SOCK" ] && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 0.5; done
 
+  # Log in first, then choose the exit node: Tailscale can only resolve an exit
+  # node by name once it is connected and has the tailnet's device list.
   if tailscale --socket="$SOCK" up --timeout=60s --auth-key="$TS_AUTHKEY" --hostname="${TS_HOSTNAME:-aria-railway}" \
-       ${TS_EXIT_NODE:+--exit-node="$TS_EXIT_NODE"} >/tmp/tailscale/up.log 2>&1; then
-    if [ -n "${TS_EXIT_NODE:-}" ]; then
+       >/tmp/tailscale/up.log 2>&1; then
+    if [ -z "${TS_EXIT_NODE:-}" ]; then
+      echo "[Tailscale] connected, but TS_EXIT_NODE is not set; YouTube traffic stays on Railway"
+    elif tailscale --socket="$SOCK" set --exit-node="$TS_EXIT_NODE" >/tmp/tailscale/up.log 2>&1; then
       echo "[Tailscale] connected; YouTube traffic goes through exit node $TS_EXIT_NODE"
       export YTDLP_PROXY="${YTDLP_PROXY:-socks5h://$SOCKS_ADDR}"
     else
-      echo "[Tailscale] connected, but TS_EXIT_NODE is not set; YouTube traffic stays on Railway"
+      echo "[Tailscale] connected, but could not use exit node $TS_EXIT_NODE; YouTube traffic stays on Railway." >&2
+      sed -E 's/tskey-[A-Za-z0-9_-]+/tskey-[REDACTED]/g' /tmp/tailscale/up.log | tail -n 15 | sed 's/^/[Tailscale] /' >&2
     fi
   else
     # Keep Aria running. Show the reason with any auth key redacted.
