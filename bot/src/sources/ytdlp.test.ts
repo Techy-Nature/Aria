@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectProvider, errorSummary, jsRuntimeArgs, proxyArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
+import { detectProvider, errorSummary, timeoutFrom, jsRuntimeArgs, proxyArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
 import { MAX_PLAYLIST_PAGES, MAX_PLAYLIST_TRACKS, YouTubeProvider } from "./youtube.js";
 import { SourceManager } from "./manager.js";
 
@@ -153,6 +153,24 @@ test("audio-containing format is a fallback and malformed JSON is contained", as
 test("resolver timeout terminates the child and returns a useful error", async () => {
   const path = await fakeYtDlp(`setInterval(()=>{},1000)`); const resolver = new YtDlpResolver({ path, available: true, timeoutMs: 30 });
   await assert.rejects(resolver.resolve("https://youtu.be/x"), /too long/); resolver.shutdown();
+});
+
+test("timeout settles even when a helper process keeps the pipes open", async () => {
+  // Mimics yt-dlp hanging while a child (e.g. the PO-token script) inherits stdout/stderr.
+  const path = await fakeYtDlp(`require('node:child_process').spawn('sleep',['30'],{stdio:'inherit'});setInterval(()=>{},1000)`);
+  const resolver = new YtDlpResolver({ path, available: true, timeoutMs: 100 }); const started = Date.now();
+  await assert.rejects(resolver.resolve("https://youtu.be/x"), /too long/); assert.ok(Date.now() - started < 5_000); resolver.shutdown();
+});
+
+test("a PO-token timeout falls back to the standard resolver", async () => {
+  const path = await fakeYtDlp(`if(process.argv.includes('--extractor-args')) setInterval(()=>{},1000); else console.log(JSON.stringify({url:'https://cdn/after-timeout',acodec:'opus',vcodec:'none'}))`);
+  const resolver = new YtDlpResolver({ path, available: true, timeoutMs: 100, poTokenEnabled: true, poTokenProviderAvailable: true });
+  assert.equal((await resolver.resolve("https://youtu.be/x")).inputUrl, "https://cdn/after-timeout"); resolver.shutdown();
+});
+
+test("YTDLP_TIMEOUT_MS is clamped with a 45 s default", () => {
+  assert.equal(timeoutFrom(undefined), 45_000); assert.equal(timeoutFrom("abc"), 45_000);
+  assert.equal(timeoutFrom("100"), 5_000); assert.equal(timeoutFrom("999999"), 180_000); assert.equal(timeoutFrom("60000"), 60_000);
 });
 
 test("missing and private media errors are user-friendly", async () => {

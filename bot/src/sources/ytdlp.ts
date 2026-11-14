@@ -7,7 +7,7 @@ import { UnplayableSourceError, ProviderUnavailableError } from "./types.js";
 
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"]);
 const MAX_OUTPUT = 2 * 1024 * 1024;
-const BASE_ARGS = ["--ignore-config", "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download"];
+const BASE_ARGS = ["--ignore-config", "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download", "--socket-timeout", "15"];
 const DEFAULT_BGUTIL_SCRIPT_PATH = "/root/bgutil-ytdlp-pot-provider/server/build/generate_once.js";
 type Format = { format_id?: unknown; url?: unknown; acodec?: unknown; vcodec?: unknown; abr?: unknown; tbr?: unknown; ext?: unknown; http_headers?: unknown };
 type Output = Format & { formats?: unknown; http_headers?: unknown };
@@ -94,11 +94,25 @@ export function detectProvider(scriptPath: string, pythonPath = "python3", nodeP
   return plugin && script && node;
 }
 
+/** Extraction time limit (default 45 s; a proxied home connection can be slow). */
+export function timeoutFrom(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(180_000, Math.max(5_000, Math.round(parsed))) : 45_000;
+}
+/**
+ * yt-dlp starts helpers (the BgUtils Node script, the JS challenge solver) that
+ * inherit its pipes. Killing only yt-dlp can leave them holding stdout open, so
+ * each run gets its own process group and the whole group is signalled.
+ */
+function killTree(child: ChildProcess, signal: NodeJS.Signals) {
+  if (child.pid === undefined) return;
+  try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* already gone */ } }
+}
 export class YtDlpResolver {
   readonly executable: string; readonly available: boolean; readonly poTokenEnabled: boolean; readonly poTokenProviderAvailable: boolean;
   private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly jsRuntimeArgs: string[]; private readonly proxyArgs: string[]; private readonly children = new Set<ChildProcess>();
   constructor(options: YtDlpOptions = {}) {
-    this.executable = options.path ?? process.env.YTDLP_PATH ?? "yt-dlp"; this.timeoutMs = options.timeoutMs ?? 20_000;
+    this.executable = options.path ?? process.env.YTDLP_PATH ?? "yt-dlp"; this.timeoutMs = options.timeoutMs ?? timeoutFrom(process.env.YTDLP_TIMEOUT_MS);
     this.bgutilScriptPath = options.bgutilScriptPath ?? process.env.BGUTIL_SCRIPT_PATH ?? DEFAULT_BGUTIL_SCRIPT_PATH;
     if (!isAbsolute(this.bgutilScriptPath)) throw new Error("BGUTIL_SCRIPT_PATH must be an absolute path");
     this.jsRuntimeArgs = jsRuntimeArgs(options.jsRuntimes ?? process.env.YTDLP_JS_RUNTIMES);
@@ -119,11 +133,12 @@ export class YtDlpResolver {
       try { return this.parse(await this.run(url, true)); }
       catch (error) {
         if (!(error instanceof ResolutionFailure)) throw error;
-        if (error.kind === "private" || error.kind === "geo" || error.kind === "timeout") throw this.publicError(error.kind, true);
+        if (error.kind === "private" || error.kind === "geo") throw this.publicError(error.kind, true);
         // Provider, bot-challenge and unclassified failures (for example the mweb
         // client returning no usable formats) all get exactly one standard attempt.
         if (error.kind === "provider") console.warn("[Sources/yt-dlp] PO-token generation failed");
         else if (error.kind === "bot") console.warn("[Sources/yt-dlp] YouTube still returned bot challenge after PO token");
+        else if (error.kind === "timeout") console.warn("[Sources/yt-dlp] PO-token attempt timed out; trying standard resolver");
         else console.warn("[Sources/yt-dlp] PO-token attempt failed; trying standard resolver");
         poFailed = true;
       }
@@ -146,14 +161,20 @@ export class YtDlpResolver {
   private run(url: URL, poToken: boolean): Promise<string> {
     const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...this.proxyArgs, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
     return new Promise<string>((resolve, reject) => {
-      const child = spawn(this.executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
+      const child = spawn(this.executable, args, { shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
       let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
       const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); this.children.delete(child); error ? reject(error) : resolve(stdout); };
-      const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 1_000).unref(); }, this.timeoutMs);
-      child.stdout.on("data", chunk => { if (outputExceeded) return; stdout += chunk; if (Buffer.byteLength(stdout) > MAX_OUTPUT) { outputExceeded = true; stdout = ""; child.stdout.destroy(); child.kill("SIGTERM"); setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 1_000).unref(); } });
+      // Settle immediately on timeout: waiting for "close" can hang forever if a
+      // helper process still holds the pipes, which also blocked later commands.
+      const timer = setTimeout(() => { timedOut = true; killTree(child, "SIGTERM"); setTimeout(() => killTree(child, "SIGKILL"), 1_000).unref(); console.warn("[Sources/yt-dlp] extraction timed out"); finish(new ResolutionFailure("timeout")); }, this.timeoutMs);
+      child.stdout.on("data", chunk => { if (outputExceeded) return; stdout += chunk; if (Buffer.byteLength(stdout) > MAX_OUTPUT) { outputExceeded = true; stdout = ""; child.stdout.destroy(); killTree(child, "SIGTERM"); setTimeout(() => killTree(child, "SIGKILL"), 1_000).unref(); } });
       child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
       child.once("error", error => finish((error as NodeJS.ErrnoException).code === "ENOENT" ? new ProviderUnavailableError("YouTube playback is unavailable because yt-dlp is not installed.") : error));
-      child.once("close", code => {
+      // If yt-dlp exits but a helper keeps the pipes open, "close" never fires;
+      // give the pipes a moment to drain, then settle from the exit code.
+      child.once("exit", code => { setTimeout(() => onDone(code), 2_000).unref(); });
+      child.once("close", code => onDone(code));
+      const onDone = (code: number | null) => {
         if (timedOut) return finish(new ResolutionFailure("timeout"));
         if (outputExceeded) return finish(new ResolutionFailure("generic"));
         if (code === 0) return finish();
@@ -162,7 +183,7 @@ export class YtDlpResolver {
         const kind = classify(stderr); const summary = errorSummary(stderr);
         console.warn(`[Sources/yt-dlp] extraction failed (${poToken ? "PO token" : "standard"}): ${kind}${summary ? ` - ${summary}` : ""}`);
         finish(new ResolutionFailure(kind));
-      });
+      };
     });
   }
   private parse(output: string): YtDlpResult {
@@ -187,5 +208,5 @@ export class YtDlpResolver {
     const args = ["--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-part", "--no-cache-dir", ...this.proxyArgs, "--load-info-json", file, "-f", formatId, "-o", "-"];
     return { command: this.executable, args, cleanup };
   }
-  shutdown() { for (const child of this.children) if (child.exitCode === null) child.kill("SIGTERM"); this.children.clear(); }
+  shutdown() { for (const child of this.children) killTree(child, "SIGTERM"); this.children.clear(); }
 }
