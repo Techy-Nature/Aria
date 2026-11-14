@@ -12,7 +12,7 @@ type Output = Format & { formats?: unknown; http_headers?: unknown };
 type FailureKind = "private" | "geo" | "bot" | "provider" | "timeout" | "generic";
 
 export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string> }
-export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string }
+export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string }
 
 class ResolutionFailure extends Error { constructor(readonly kind: FailureKind) { super(kind); } }
 
@@ -45,6 +45,23 @@ function classify(stderr: string): FailureKind {
   if (/sign in to confirm|not a bot|bot.?challenge|login required|authentication required/.test(detail)) return "bot";
   return "generic";
 }
+/**
+ * yt-dlp solves YouTube's JavaScript challenges with an external runtime and the
+ * yt-dlp-ejs scripts. It only enables Deno by default, so Aria opts in to the
+ * Node.js runtime that already ships in its image. Set YTDLP_JS_RUNTIMES to
+ * another value (e.g. "deno" or "node:/usr/bin/node"), or to "none" to omit it.
+ */
+export function jsRuntimeArgs(value: string | undefined): string[] {
+  const runtime = (value ?? "node").trim();
+  if (!runtime || /^none$/i.test(runtime)) return [];
+  if (!/^[A-Za-z0-9_.:/,-]+$/.test(runtime)) throw new Error("YTDLP_JS_RUNTIMES contains unsupported characters");
+  return ["--js-runtimes", runtime];
+}
+/** The final yt-dlp ERROR line, redacted, for operators to diagnose failures. */
+export function errorSummary(stderr: string): string | undefined {
+  const line = stderr.split(/\r?\n/).reverse().find(item => /\bERROR:/.test(item));
+  return line ? sanitized(line.replace(/^.*?ERROR:\s*/, "")).slice(0, 300) : undefined;
+}
 export function sanitized(stderr: string) {
   return stderr.replace(/https?:\/\/\S+/gi, "[URL]")
     .replace(/\b(po_?token|pot|token|visitor_?data|authorization|cookie)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
@@ -65,11 +82,12 @@ export function detectProvider(scriptPath: string, pythonPath = "python3", nodeP
 
 export class YtDlpResolver {
   readonly executable: string; readonly available: boolean; readonly poTokenEnabled: boolean; readonly poTokenProviderAvailable: boolean;
-  private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly children = new Set<ChildProcess>();
+  private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly jsRuntimeArgs: string[]; private readonly children = new Set<ChildProcess>();
   constructor(options: YtDlpOptions = {}) {
     this.executable = options.path ?? process.env.YTDLP_PATH ?? "yt-dlp"; this.timeoutMs = options.timeoutMs ?? 20_000;
     this.bgutilScriptPath = options.bgutilScriptPath ?? process.env.BGUTIL_SCRIPT_PATH ?? DEFAULT_BGUTIL_SCRIPT_PATH;
     if (!isAbsolute(this.bgutilScriptPath)) throw new Error("BGUTIL_SCRIPT_PATH must be an absolute path");
+    this.jsRuntimeArgs = jsRuntimeArgs(options.jsRuntimes ?? process.env.YTDLP_JS_RUNTIMES);
     this.available = options.available ?? spawnSync(this.executable, ["--version"], { shell: false, stdio: "ignore", timeout: 3_000 }).status === 0;
     this.poTokenEnabled = options.poTokenEnabled ?? enabled(process.env.YTDLP_PO_TOKEN_ENABLED);
     this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider(this.bgutilScriptPath, options.pythonPath, options.nodePath));
@@ -86,9 +104,11 @@ export class YtDlpResolver {
       catch (error) {
         if (!(error instanceof ResolutionFailure)) throw error;
         if (error.kind === "private" || error.kind === "geo" || error.kind === "timeout") throw this.publicError(error.kind, true);
-        if (error.kind !== "provider" && error.kind !== "bot") throw this.publicError(error.kind, true);
+        // Provider, bot-challenge and unclassified failures (for example the mweb
+        // client returning no usable formats) all get exactly one standard attempt.
         if (error.kind === "provider") console.warn("[Sources/yt-dlp] PO-token generation failed");
-        else console.warn("[Sources/yt-dlp] YouTube still returned bot challenge after PO token");
+        else if (error.kind === "bot") console.warn("[Sources/yt-dlp] YouTube still returned bot challenge after PO token");
+        else console.warn("[Sources/yt-dlp] PO-token attempt failed; trying standard resolver");
         poFailed = true;
       }
     } else if (this.poTokenEnabled) poFailed = true;
@@ -108,7 +128,7 @@ export class YtDlpResolver {
     return new UnplayableSourceError("I couldn't resolve that YouTube audio stream.");
   }
   private run(url: URL, poToken: boolean): Promise<string> {
-    const args = [...BASE_ARGS, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
+    const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
       let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
@@ -121,10 +141,10 @@ export class YtDlpResolver {
         if (timedOut) return finish(new ResolutionFailure("timeout"));
         if (outputExceeded) return finish(new ResolutionFailure("generic"));
         if (code === 0) return finish();
-        // Never emit raw stderr: even aggressive redaction can miss a new token or
-        // signed-URL spelling. Only the locally classified, fixed diagnostic is logged.
-        const kind = classify(stderr);
-        if (kind !== "provider" && kind !== "bot") console.warn(`[Sources/yt-dlp] extraction failed (${poToken ? "PO token" : "standard"}): ${kind}`);
+        // Never emit raw stderr. Only the classified kind plus yt-dlp's final ERROR
+        // line, with URLs, tokens and long opaque values redacted, is logged.
+        const kind = classify(stderr); const summary = errorSummary(stderr);
+        console.warn(`[Sources/yt-dlp] extraction failed (${poToken ? "PO token" : "standard"}): ${kind}${summary ? ` - ${summary}` : ""}`);
         finish(new ResolutionFailure(kind));
       });
     });
