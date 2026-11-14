@@ -33,27 +33,37 @@ export function createPcmFrame(bytes: Buffer, channels = PCM_CHANNELS): AudioFra
 }
 
 /**
- * Pulls PCM only as quickly as LiveKit accepts frames. Node's Readable
- * high-water mark supplies the bounded buffer while captureFrame is pending.
+ * Pulls PCM only as quickly as LiveKit accepts frames. LiveKit's AudioSource
+ * queue (LIVEKIT_QUEUE_MS) is the playout buffer that absorbs network and CPU
+ * jitter; Node's Readable high-water mark bounds memory while captureFrame waits.
+ * Destroying the stream after an abort is a normal stop, not a failure.
  */
 export async function pumpPcm(stream: Readable, sink: FrameSink, signal: AbortSignal, channels = PCM_CHANNELS): Promise<PumpStats> {
   const frameBytes = PCM_SAMPLES_PER_CHANNEL * channels * PCM_SAMPLE_BYTES;
   let pending = Buffer.alloc(0), maxBufferedBytes = 0, frames = 0;
-  for await (const value of stream) {
-    if (signal.aborted) break;
-    pending = Buffer.concat([pending, value as Buffer]);
-    maxBufferedBytes = Math.max(maxBufferedBytes, pending.length + stream.readableLength);
-    while (pending.length >= frameBytes && !signal.aborted) {
-      const bytes = pending.subarray(0, frameBytes); pending = pending.subarray(frameBytes);
-      await sink.captureFrame(createPcmFrame(bytes, channels));
-      frames++;
+  try {
+    for await (const value of stream) {
+      if (signal.aborted) break;
+      pending = Buffer.concat([pending, value as Buffer]);
+      maxBufferedBytes = Math.max(maxBufferedBytes, pending.length + stream.readableLength);
+      while (pending.length >= frameBytes && !signal.aborted) {
+        const bytes = pending.subarray(0, frameBytes); pending = pending.subarray(frameBytes);
+        await sink.captureFrame(createPcmFrame(bytes, channels));
+        frames++;
+      }
     }
+  } catch (error) {
+    if (!signal.aborted) throw error;
   }
   return { maxBufferedBytes, frames };
 }
 
 export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSource): Promise<Decoder> {
-  const args = ["-hide_banner", "-loglevel", "warning", "-nostdin", "-re"];
+  // No -re: decoding ahead lets LiveKit's queue hold a playout buffer, so a
+  // slow network read or a CPU pause no longer starves the voice track.
+  // Reconnect options keep long HTTP/HLS streams alive across brief drops.
+  const args = ["-hide_banner", "-loglevel", "warning", "-nostdin",
+    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5"];
   if ((source.positionSeconds ?? 0) > 0) args.push("-ss", String(source.positionSeconds));
   if (source.requestHeaders && Object.keys(source.requestHeaders).length) {
     // Values originate only in a provider response. Reject line breaks so a
@@ -76,8 +86,11 @@ export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSou
     manual = true; abort.abort(); child.stdout.destroy(); sink.clearQueue();
     // A capture already awaiting the native source can finish after the first
     // clear; clear once more after the pump exits so skipped PCM cannot leak.
-    void pumping.finally(() => sink.clearQueue());
+    const clear = () => sink.clearQueue();
+    void pumping.then(clear, clear);
     if (child.exitCode === null) { child.kill("SIGCONT"); child.kill("SIGTERM"); }
   };
-  return { pause: () => child.kill("SIGSTOP"), resume: () => child.kill("SIGCONT"), stop, done };
+  // Pausing also drops the playout buffer so audio stops immediately rather than
+  // after the queued second plays out. At most that buffer is skipped on resume.
+  return { pause: () => { child.kill("SIGSTOP"); sink.clearQueue(); }, resume: () => child.kill("SIGCONT"), stop, done };
 }

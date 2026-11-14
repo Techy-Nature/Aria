@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AudioSource, LocalAudioTrack, Room } from "@livekit/rtc-node";
-import { LiveKitVoiceTransport, type VoiceCredentials } from "./livekit.js";
+import { LiveKitVoiceTransport, queueMs, type VoiceCredentials } from "./livekit.js";
 
 const deferred = <T>() => { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((ok, no) => { resolve = ok; reject = no; }); return { promise, resolve, reject }; };
 
@@ -53,4 +53,9 @@ test("disconnect invalidates an in-flight connect and cleans its signaling", asy
   assert.equal(transport.isConnected("guild"), false); assert.equal(transport.rooms.length, 0); assert.equal(transport.leaves, 1);
   transport.nextCredentials = undefined; await transport.connect("guild", "channel"); await transport.disconnect("guild");
   assert.equal(transport.rooms.length, 1); assert.equal(transport.rooms[0].disconnects, 1); assert.equal(transport.isConnected("guild"), false);
+});
+
+test("playout buffer defaults to one second and is clamped", () => {
+  assert.equal(queueMs(undefined), 1000); assert.equal(queueMs("abc"), 1000); assert.equal(queueMs("0"), 1000);
+  assert.equal(queueMs("1500"), 1500); assert.equal(queueMs("50"), 200); assert.equal(queueMs("99999"), 5000);
 });

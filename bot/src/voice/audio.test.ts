@@ -68,3 +68,18 @@ test("abort prevents buffered old frames from publishing", async () => {
   await new Promise(resolve => setTimeout(resolve, 10)); abort.abort(); release(); await pumping;
   assert.equal(frames, 1);
 });
+
+test("destroying the decoder stream after a stop resolves instead of crashing", async () => {
+  const abort = new AbortController();
+  const stream = new Readable({ read() { this.push(Buffer.alloc(frameBytes)); } });
+  const pumping = pumpPcm(stream, { captureFrame: async () => { await new Promise(resolve => setTimeout(resolve, 1)); } }, abort.signal);
+  await new Promise(resolve => setTimeout(resolve, 10)); abort.abort(); stream.destroy();
+  const stats = await pumping; assert.ok(stats.frames > 0);
+});
+
+test("an unexpected stream failure without a stop still rejects", async () => {
+  const stream = new Readable({ read() {} });
+  const pumping = pumpPcm(stream, { captureFrame: async () => {} }, new AbortController().signal);
+  stream.destroy(new Error("decoder pipe broke"));
+  await assert.rejects(pumping, /decoder pipe broke/);
+});
