@@ -1,17 +1,19 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
-import { statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { UnplayableSourceError, ProviderUnavailableError } from "./types.js";
 
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"]);
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const BASE_ARGS = ["--ignore-config", "--dump-single-json", "--no-playlist", "--no-warnings", "--skip-download"];
 const DEFAULT_BGUTIL_SCRIPT_PATH = "/root/bgutil-ytdlp-pot-provider/server/build/generate_once.js";
-type Format = { url?: unknown; acodec?: unknown; vcodec?: unknown; abr?: unknown; tbr?: unknown; ext?: unknown; http_headers?: unknown };
+type Format = { format_id?: unknown; url?: unknown; acodec?: unknown; vcodec?: unknown; abr?: unknown; tbr?: unknown; ext?: unknown; http_headers?: unknown };
 type Output = Format & { formats?: unknown; http_headers?: unknown };
 type FailureKind = "private" | "geo" | "bot" | "provider" | "timeout" | "generic";
 
-export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string> }
+export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string>; inputCommand?: { command: string; args: string[]; cleanup: () => void } }
 export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string }
 
 class ResolutionFailure extends Error { constructor(readonly kind: FailureKind) { super(kind); } }
@@ -154,7 +156,22 @@ export class YtDlpResolver {
     const formats = Array.isArray(data.formats) ? (data.formats as Format[]).filter(playable).sort((a, b) => score(b) - score(a)) : [];
     const selected = formats[0] ?? (playable(data) ? data : undefined);
     if (!selected || typeof selected.url !== "string") throw new UnplayableSourceError("I couldn't find a playable audio stream for that source.");
-    return { inputUrl: selected.url, requestHeaders: headers(selected.http_headers) ?? headers(data.http_headers) };
+    const formatId = typeof selected.format_id === "string" && /^[A-Za-z0-9_.-]+$/.test(selected.format_id) ? selected.format_id : "bestaudio/best";
+    return { inputUrl: selected.url, requestHeaders: headers(selected.http_headers) ?? headers(data.http_headers), inputCommand: this.downloadCommand(output, formatId) };
+  }
+  /**
+   * Re-uses the extracted info (no second extraction or PO-token request) and
+   * lets yt-dlp itself stream the chosen format to stdout, in YouTube's ranged
+   * chunks with the headers it expects. The info file holds signed URLs, so it
+   * lives in a private temp directory that cleanup removes.
+   */
+  private downloadCommand(infoJson: string, formatId: string) {
+    const dir = mkdtempSync(join(tmpdir(), "aria-ytdlp-")); const file = join(dir, "info.json");
+    writeFileSync(file, infoJson, { mode: 0o600 });
+    let cleaned = false;
+    const cleanup = () => { if (cleaned) return; cleaned = true; rmSync(dir, { recursive: true, force: true }); };
+    const args = ["--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-part", "--no-cache-dir", "--load-info-json", file, "-f", formatId, "-o", "-"];
+    return { command: this.executable, args, cleanup };
   }
   shutdown() { for (const child of this.children) if (child.exitCode === null) child.kill("SIGTERM"); this.children.clear(); }
 }

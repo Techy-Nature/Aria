@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { Readable } from "node:stream";
 import { AudioFrame, type AudioSource as LiveKitAudioSource } from "@livekit/rtc-node";
 import type { AudioSource } from "./types.js";
@@ -33,29 +33,40 @@ export function createPcmFrame(bytes: Buffer, channels = PCM_CHANNELS): AudioFra
 }
 
 /**
- * Pulls PCM only as quickly as LiveKit accepts frames. Node's Readable
- * high-water mark supplies the bounded buffer while captureFrame is pending.
+ * Pulls PCM only as quickly as LiveKit accepts frames. LiveKit's AudioSource
+ * queue (LIVEKIT_QUEUE_MS) is the playout buffer that absorbs network and CPU
+ * jitter; Node's Readable high-water mark bounds memory while captureFrame waits.
+ * Destroying the stream after an abort is a normal stop, not a failure.
  */
 export async function pumpPcm(stream: Readable, sink: FrameSink, signal: AbortSignal, channels = PCM_CHANNELS): Promise<PumpStats> {
   const frameBytes = PCM_SAMPLES_PER_CHANNEL * channels * PCM_SAMPLE_BYTES;
   let pending = Buffer.alloc(0), maxBufferedBytes = 0, frames = 0;
-  for await (const value of stream) {
-    if (signal.aborted) break;
-    pending = Buffer.concat([pending, value as Buffer]);
-    maxBufferedBytes = Math.max(maxBufferedBytes, pending.length + stream.readableLength);
-    while (pending.length >= frameBytes && !signal.aborted) {
-      const bytes = pending.subarray(0, frameBytes); pending = pending.subarray(frameBytes);
-      await sink.captureFrame(createPcmFrame(bytes, channels));
-      frames++;
+  try {
+    for await (const value of stream) {
+      if (signal.aborted) break;
+      pending = Buffer.concat([pending, value as Buffer]);
+      maxBufferedBytes = Math.max(maxBufferedBytes, pending.length + stream.readableLength);
+      while (pending.length >= frameBytes && !signal.aborted) {
+        const bytes = pending.subarray(0, frameBytes); pending = pending.subarray(frameBytes);
+        await sink.captureFrame(createPcmFrame(bytes, channels));
+        frames++;
+      }
     }
+  } catch (error) {
+    if (!signal.aborted) throw error;
   }
   return { maxBufferedBytes, frames };
 }
 
 export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSource): Promise<Decoder> {
-  const args = ["-hide_banner", "-loglevel", "warning", "-nostdin", "-re"];
+  // No -re: decoding ahead lets LiveKit's queue hold a playout buffer, so a
+  // slow network read or a CPU pause no longer starves the voice track.
+  // Reconnect options keep long HTTP/HLS streams alive across brief drops.
+  const piped = source.inputCommand;
+  const args = ["-hide_banner", "-loglevel", "warning"];
+  if (!piped) args.push("-nostdin", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5");
   if ((source.positionSeconds ?? 0) > 0) args.push("-ss", String(source.positionSeconds));
-  if (source.requestHeaders && Object.keys(source.requestHeaders).length) {
+  if (!piped && source.requestHeaders && Object.keys(source.requestHeaders).length) {
     // Values originate only in a provider response. Reject line breaks so a
     // malformed extractor response cannot inject additional protocol headers.
     const headers = Object.entries(source.requestHeaders)
@@ -63,10 +74,23 @@ export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSou
       .map(([name, value]) => `${name}: ${value}\r\n`).join("");
     if (headers) args.push("-headers", headers);
   }
-  args.push("-i", source.inputUrl, "-vn", "-ac", String(PCM_CHANNELS), "-ar", String(PCM_SAMPLE_RATE), "-f", "s16le", "pipe:1");
-  const child = spawn(process.env.FFMPEG_PATH ?? "ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+  args.push("-i", piped ? "pipe:0" : source.inputUrl, "-vn", "-ac", String(PCM_CHANNELS), "-ar", String(PCM_SAMPLE_RATE), "-f", "s16le", "pipe:1");
+  const child = spawn(process.env.FFMPEG_PATH ?? "ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+  if (!piped) child.stdin.end();
   const abort = new AbortController(); let stderr = "", manual = false;
   child.stderr.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-4096); });
+  let feeder: ChildProcess | undefined;
+  if (piped) {
+    feeder = spawn(piped.command, piped.args, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    feeder.stderr?.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-4096); });
+    feeder.once("error", error => { stderr += `\ninput process failed: ${error.message}`; piped.cleanup?.(); child.stdin.destroy(); });
+    feeder.once("exit", () => piped.cleanup?.());
+    // EPIPE when ffmpeg exits first (stop/skip) is expected, not a failure.
+    child.stdin.on("error", () => {}); feeder.stdout?.on("error", () => {});
+    feeder.stdout?.pipe(child.stdin);
+  }
+  const killFeeder = () => { if (feeder && feeder.exitCode === null) { feeder.kill("SIGCONT"); feeder.kill("SIGTERM"); } };
+  child.once("close", killFeeder);
   const pumping = pumpPcm(child.stdout, sink, abort.signal);
   const done = new Promise<void>((resolve, reject) => {
     child.once("error", reject);
@@ -76,8 +100,12 @@ export async function decodeToLiveKit(source: AudioSource, sink: LiveKitAudioSou
     manual = true; abort.abort(); child.stdout.destroy(); sink.clearQueue();
     // A capture already awaiting the native source can finish after the first
     // clear; clear once more after the pump exits so skipped PCM cannot leak.
-    void pumping.finally(() => sink.clearQueue());
+    const clear = () => sink.clearQueue();
+    void pumping.then(clear, clear);
     if (child.exitCode === null) { child.kill("SIGCONT"); child.kill("SIGTERM"); }
+    killFeeder();
   };
-  return { pause: () => child.kill("SIGSTOP"), resume: () => child.kill("SIGCONT"), stop, done };
+  // Pausing also drops the playout buffer so audio stops immediately rather than
+  // after the queued second plays out. At most that buffer is skipped on resume.
+  return { pause: () => { child.kill("SIGSTOP"); sink.clearQueue(); }, resume: () => child.kill("SIGCONT"), stop, done };
 }

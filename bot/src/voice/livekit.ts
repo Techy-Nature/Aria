@@ -3,6 +3,11 @@ import { AudioSource as LiveKitAudioSource, LocalAudioTrack, Room, TrackPublishO
 import { decodeToLiveKit, type Decoder } from "./audio.js";
 import type { AudioSource, PlaybackEvent, VoiceTransport } from "./types.js";
 
+/** Playout buffer in milliseconds (default 1000, clamped to 200-5000). */
+export function queueMs(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(5000, Math.max(200, Math.round(parsed))) : 1000;
+}
 export interface VoiceCredentials { endpoint: string; token: string }
 interface Session { channelId: string; room: Room; sink: LiveKitAudioSource; track: LocalAudioTrack; decoder?: Decoder; generation: number; manualGeneration: number }
 interface ConnectionAttempt { channelId: string; promise: Promise<void>; cancelled: boolean }
@@ -56,7 +61,7 @@ export abstract class LiveKitVoiceTransport implements VoiceTransport {
     }
   }
   protected createRoom(): Room { return new Room(); }
-  protected createAudioSource(): LiveKitAudioSource { return new LiveKitAudioSource(48000, 2); }
+  protected createAudioSource(): LiveKitAudioSource { return new LiveKitAudioSource(48000, 2, queueMs(process.env.LIVEKIT_QUEUE_MS)); }
   protected createAudioTrack(sink: LiveKitAudioSource): LocalAudioTrack { return LocalAudioTrack.createAudioTrack("aria-audio", sink); }
   async play(guildId: string, source: AudioSource, generation: number) {
     const session = this.require(guildId); this.stopDecoder(session); session.generation = generation;

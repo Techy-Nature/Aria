@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
-import { createPcmFrame, PCM_FRAME_BYTES, PCM_FRAME_SAMPLES, PCM_SAMPLE_RATE, PCM_SAMPLES_PER_CHANNEL, pumpPcm } from "./audio.js";
+import { createPcmFrame, decodeToLiveKit, PCM_FRAME_BYTES, PCM_FRAME_SAMPLES, PCM_SAMPLE_RATE, PCM_SAMPLES_PER_CHANNEL, pumpPcm } from "./audio.js";
 
 const frameBytes = PCM_FRAME_BYTES;
 
@@ -67,4 +67,50 @@ test("abort prevents buffered old frames from publishing", async () => {
   const pumping = pumpPcm(stream, { captureFrame: async () => { frames++; await gate; } }, abort.signal);
   await new Promise(resolve => setTimeout(resolve, 10)); abort.abort(); release(); await pumping;
   assert.equal(frames, 1);
+});
+
+test("destroying the decoder stream after a stop resolves instead of crashing", async () => {
+  const abort = new AbortController();
+  const stream = new Readable({ read() { this.push(Buffer.alloc(frameBytes)); } });
+  const pumping = pumpPcm(stream, { captureFrame: async () => { await new Promise(resolve => setTimeout(resolve, 1)); } }, abort.signal);
+  await new Promise(resolve => setTimeout(resolve, 10)); abort.abort(); stream.destroy();
+  const stats = await pumping; assert.ok(stats.frames > 0);
+});
+
+test("an unexpected stream failure without a stop still rejects", async () => {
+  const stream = new Readable({ read() {} });
+  const pumping = pumpPcm(stream, { captureFrame: async () => {} }, new AbortController().signal);
+  stream.destroy(new Error("decoder pipe broke"));
+  await assert.rejects(pumping, /decoder pipe broke/);
+});
+
+function wavFile(seconds: number) {
+  const pcm = Buffer.alloc(48000 * 4 * seconds);
+  const wav = Buffer.alloc(44 + pcm.length);
+  wav.write("RIFF"); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8);
+  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(2, 22);
+  wav.writeUInt32LE(48000, 24); wav.writeUInt32LE(48000 * 4, 28); wav.writeUInt16LE(4, 32); wav.writeUInt16LE(16, 34);
+  wav.write("data", 36); wav.writeUInt32LE(pcm.length, 40); pcm.copy(wav, 44);
+  return wav;
+}
+
+test("decoder reads from an input process (yt-dlp) and cleans up after it", async () => {
+  const { mkdtemp, writeFile } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const file = join(await mkdtemp(join(tmpdir(), "aria-feed-")), "a.wav"); await writeFile(file, wavFile(1));
+  let frames = 0, cleaned = 0;
+  const sink = { captureFrame: async () => { frames++; }, clearQueue() {} };
+  const decoder = await decodeToLiveKit({ track: { id: "t", title: "t", url: "u", artist: "a", duration: 1 }, inputUrl: "https://unused.example/", inputCommand: { command: "cat", args: [file], cleanup: () => { cleaned++; } } }, sink as never);
+  await decoder.done;
+  assert.equal(frames, 100); assert.equal(cleaned, 1);
+});
+
+test("stopping a piped decoder kills the input process without crashing", async () => {
+  const { mkdtemp, writeFile } = await import("node:fs/promises"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const header = join(await mkdtemp(join(tmpdir(), "aria-feed-")), "h.wav"); await writeFile(header, wavFile(600).subarray(0, 44));
+  let frames = 0, cleaned = 0;
+  const sink = { captureFrame: async () => { frames++; await new Promise(resolve => setTimeout(resolve, 1)); }, clearQueue() {} };
+  const decoder = await decodeToLiveKit({ track: { id: "t", title: "t", url: "u", artist: "a", duration: 1 }, inputUrl: "https://unused.example/", inputCommand: { command: "sh", args: ["-c", `cat "$0"; exec cat /dev/zero`, header], cleanup: () => { cleaned++; } } }, sink as never);
+  await new Promise(resolve => setTimeout(resolve, 200)); decoder.stop();
+  await decoder.done; await new Promise(resolve => setTimeout(resolve, 100));
+  assert.ok(frames > 0); assert.equal(cleaned, 1);
 });
