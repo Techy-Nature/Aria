@@ -123,8 +123,9 @@ export class YtDlpResolver {
     this.poTokenEnabled = options.poTokenEnabled ?? enabled(process.env.YTDLP_PO_TOKEN_ENABLED);
     this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider(this.bgutilScriptPath, options.pythonPath, options.nodePath));
     if (this.available) console.log("[Sources/yt-dlp] available");
-    if (this.proxyArgs.length) console.log("[Sources/yt-dlp] routing YouTube through YTDLP_PROXY");
     else console.warn("[Sources/yt-dlp] unavailable");
+    if (this.proxyArgs.length) console.log("[Sources/yt-dlp] routing YouTube through YTDLP_PROXY");
+    else console.log("[Sources/yt-dlp] YTDLP_PROXY not set; YouTube goes out from this server's own IP");
     if (this.poTokenEnabled && !this.poTokenProviderAvailable) console.warn("[Sources/yt-dlp] PO token provider unavailable; using normal resolver");
   }
   async resolve(input: string): Promise<YtDlpResult> {
