@@ -1,8 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { statSync } from "node:fs";
 import { UnplayableSourceError, ProviderUnavailableError } from "./types.js";
 
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"]);
@@ -64,6 +62,10 @@ export function jsRuntimeArgs(value: string | undefined): string[] {
  * media download, which must come from the same IP). Used to send YouTube
  * traffic through a home connection, e.g. Tailscale's SOCKS5 proxy.
  */
+/** The IP family a googlevideo URL is bound to ("IPv4", "IPv6" or "unknown"); the address itself is never logged. */
+export function signedFamily(mediaUrl: string): string {
+  try { const ip = new URL(mediaUrl).searchParams.get("ip"); return !ip ? "unknown" : ip.includes(":") ? "IPv6" : "IPv4"; } catch { return "unknown"; }
+}
 export function proxyArgs(value: string | undefined): string[] {
   const proxy = value?.trim();
   if (!proxy) return [];
@@ -130,7 +132,7 @@ export class YtDlpResolver {
     if (!this.available) throw new ProviderUnavailableError("YouTube playback is unavailable because yt-dlp is not installed.");
     let poFailed = false;
     if (this.poTokenEnabled && this.poTokenProviderAvailable) {
-      try { return this.parse(await this.run(url, true)); }
+      try { return this.parse(await this.run(url, true), url, true); }
       catch (error) {
         if (!(error instanceof ResolutionFailure)) throw error;
         if (error.kind === "private" || error.kind === "geo") throw this.publicError(error.kind, true);
@@ -143,7 +145,7 @@ export class YtDlpResolver {
         poFailed = true;
       }
     } else if (this.poTokenEnabled) poFailed = true;
-    try { return this.parse(await this.run(url, false)); }
+    try { return this.parse(await this.run(url, false), url, false); }
     catch (error) {
       if (!(error instanceof ResolutionFailure)) throw error;
       if (error.kind === "bot" && poFailed) { console.warn("[Sources/yt-dlp] standard fallback also received bot challenge"); throw new UnplayableSourceError("YouTube blocked playback from Aria's server. PO-token playback was unavailable or unsuccessful."); }
@@ -159,7 +161,7 @@ export class YtDlpResolver {
     return new UnplayableSourceError("I couldn't resolve that YouTube audio stream.");
   }
   private run(url: URL, poToken: boolean): Promise<string> {
-    const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...this.proxyArgs, ...(poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : []), url.toString()];
+    const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...this.proxyArgs, ...this.poArgs(poToken), url.toString()];
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.executable, args, { shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
       let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
@@ -186,27 +188,31 @@ export class YtDlpResolver {
       };
     });
   }
-  private parse(output: string): YtDlpResult {
+  private poArgs(poToken: boolean): string[] {
+    return poToken ? ["--extractor-args", "youtube:player_client=mweb", "--extractor-args", `youtubepot-bgutilscript:script_path=${this.bgutilScriptPath}`] : [];
+  }
+  private parse(output: string, url: URL, poToken: boolean): YtDlpResult {
     let data: Output; try { data = JSON.parse(output) as Output; } catch { throw new UnplayableSourceError("I couldn't resolve that YouTube audio stream."); }
     const formats = Array.isArray(data.formats) ? (data.formats as Format[]).filter(playable).sort((a, b) => score(b) - score(a)) : [];
     const selected = formats[0] ?? (playable(data) ? data : undefined);
     if (!selected || typeof selected.url !== "string") throw new UnplayableSourceError("I couldn't find a playable audio stream for that source.");
     const formatId = typeof selected.format_id === "string" && /^[A-Za-z0-9_.-]+$/.test(selected.format_id) ? selected.format_id : "bestaudio/best";
-    return { inputUrl: selected.url, requestHeaders: headers(selected.http_headers) ?? headers(data.http_headers), inputCommand: this.downloadCommand(output, formatId) };
+    console.log(`[Sources/yt-dlp] resolved ${poToken ? "with PO token" : "standard"}; media URL signed for ${signedFamily(selected.url)}`);
+    return { inputUrl: selected.url, requestHeaders: headers(selected.http_headers) ?? headers(data.http_headers), inputCommand: this.downloadCommand(url, poToken, formatId) };
   }
   /**
-   * Re-uses the extracted info (no second extraction or PO-token request) and
-   * lets yt-dlp itself stream the chosen format to stdout, in YouTube's ranged
-   * chunks with the headers it expects. The info file holds signed URLs, so it
-   * lives in a private temp directory that cleanup removes.
+   * yt-dlp streams the media itself, in YouTube's ranged chunks with the headers
+   * it expects. It extracts again in the same process (same client, PO-token
+   * setup, proxy and IP family), because a URL signed in one process was
+   * rejected with 403 when another process fetched it through the exit node.
+   * signedFamily() logs which IP family the URL was signed for, to diagnose
+   * IPv4/IPv6 mismatches behind a proxy.
+   * The selected format is preferred, with bestaudio as a fallback.
    */
-  private downloadCommand(infoJson: string, formatId: string) {
-    const dir = mkdtempSync(join(tmpdir(), "aria-ytdlp-")); const file = join(dir, "info.json");
-    writeFileSync(file, infoJson, { mode: 0o600 });
-    let cleaned = false;
-    const cleanup = () => { if (cleaned) return; cleaned = true; rmSync(dir, { recursive: true, force: true }); };
-    const args = ["--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-part", "--no-cache-dir", ...this.proxyArgs, "--load-info-json", file, "-f", formatId, "-o", "-"];
-    return { command: this.executable, args, cleanup };
+  private downloadCommand(url: URL, poToken: boolean, formatId: string) {
+    const format = formatId === "bestaudio/best" ? formatId : `${formatId}/bestaudio/best`;
+    const args = ["--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-part", "--no-cache-dir", "--no-playlist", "--socket-timeout", "15", ...this.jsRuntimeArgs, ...this.proxyArgs, ...this.poArgs(poToken), "-f", format, "-o", "-", url.toString()];
+    return { command: this.executable, args, cleanup: () => {} };
   }
   shutdown() { for (const child of this.children) killTree(child, "SIGTERM"); this.children.clear(); }
 }

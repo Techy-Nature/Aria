@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectProvider, errorSummary, timeoutFrom, jsRuntimeArgs, proxyArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
+import { detectProvider, errorSummary, signedFamily, timeoutFrom, jsRuntimeArgs, proxyArgs, sanitized, YtDlpResolver, validateYtDlpUrl } from "./ytdlp.js";
 import { MAX_PLAYLIST_PAGES, MAX_PLAYLIST_TRACKS, YouTubeProvider } from "./youtube.js";
 import { SourceManager } from "./manager.js";
 
@@ -208,7 +208,20 @@ test("YTDLP_PROXY is validated and applied to extraction and the media download"
   const path = await fakeYtDlp(`const i=process.argv.indexOf('--proxy');if(i<0||process.argv[i+1]!=='http://u:p@home:8080')process.exit(9);console.log(JSON.stringify({formats:[{format_id:'251',url:'https://cdn/a',acodec:'opus',vcodec:'none'}]}))`);
   const result = await new YtDlpResolver({ path, available: true, proxy: "http://u:p@home:8080" }).resolve("https://youtu.be/x");
   const args = result.inputCommand!.args; const i = args.indexOf("--proxy");
-  assert.equal(args[i + 1], "http://u:p@home:8080"); assert.ok(args.includes("--load-info-json")); result.inputCommand!.cleanup();
+  assert.equal(args[i + 1], "http://u:p@home:8080"); assert.equal(args.at(-1), "https://youtu.be/x");
+  assert.equal(args[args.indexOf("-f") + 1], "251/bestaudio/best"); result.inputCommand!.cleanup();
+});
+
+test("the signed IP family is reported without the address", () => {
+  assert.equal(signedFamily("https://rr1.googlevideo.com/videoplayback?ip=203.0.113.9&x=1"), "IPv4");
+  assert.equal(signedFamily("https://rr1.googlevideo.com/videoplayback?ip=2001%3Adb8%3A%3A1"), "IPv6");
+  assert.equal(signedFamily("https://cdn/a"), "unknown"); assert.equal(signedFamily("not a url"), "unknown");
+});
+
+test("the PO-token download repeats the PO-token client settings", async () => {
+  const path = await fakeYtDlp(`console.log(JSON.stringify({formats:[{format_id:'251',url:'https://cdn/a',acodec:'opus',vcodec:'none'}]}))`);
+  const result = await new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true, bgutilScriptPath: "/x/generate_once.js" }).resolve("https://youtu.be/x");
+  assert.ok(result.inputCommand!.args.includes("youtube:player_client=mweb"));
 });
 
 test("proxy credentials are redacted from diagnostics", () => {
