@@ -173,6 +173,13 @@ test("YTDLP_TIMEOUT_MS is clamped with a 45 s default", () => {
   assert.equal(timeoutFrom("100"), 5_000); assert.equal(timeoutFrom("999999"), 180_000); assert.equal(timeoutFrom("60000"), 60_000);
 });
 
+test("a failing proxy reports the exit node and skips the second attempt", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aria-ytdlp-proxy-")); const calls = join(dir, "calls");
+  const path = await fakeYtDlp(`require('node:fs').appendFileSync(${JSON.stringify(calls)},'x');console.error("ERROR: [youtube] x: Unable to download API page: ('[Errno 1] general SOCKS server failure', Socks5Error(1, 'general SOCKS server failure'))");process.exit(1)`);
+  await assert.rejects(new YtDlpResolver({ path, available: true, poTokenEnabled: true, poTokenProviderAvailable: true }).resolve("https://youtu.be/x"), /home connection/);
+  assert.equal((await (await import("node:fs/promises")).readFile(calls, "utf8")).length, 1);
+});
+
 test("missing and private media errors are user-friendly", async () => {
   const missing = new YtDlpResolver({ path: "/definitely/missing/yt-dlp", available: true }); await assert.rejects(missing.resolve("https://youtu.be/x"), /not installed/);
   const privateVideo = await fakeYtDlp(`console.error('This video is private');process.exit(1)`);
