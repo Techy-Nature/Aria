@@ -27,6 +27,10 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
     elif tailscale --socket="$SOCK" set --exit-node="$TS_EXIT_NODE" >/tmp/tailscale/up.log 2>&1; then
       echo "[Tailscale] connected; YouTube traffic goes through exit node $TS_EXIT_NODE"
       export YTDLP_PROXY="${YTDLP_PROXY:-socks5h://$SOCKS_ADDR}"
+      # Diagnostics only: list exit nodes this container can use, then test the
+      # route in the background so a slow exit node never delays startup.
+      tailscale --socket="$SOCK" exit-node list 2>&1 | sed 's/^/[Tailscale] /' || true
+      python3 /app/socks_probe.py "$SOCKS_ADDR" &
     else
       echo "[Tailscale] connected, but could not use exit node $TS_EXIT_NODE; YouTube traffic stays on Railway." >&2
       sed -E 's/tskey-[A-Za-z0-9_-]+/tskey-[REDACTED]/g' /tmp/tailscale/up.log | tail -n 15 | sed 's/^/[Tailscale] /' >&2

@@ -25,6 +25,7 @@ COPY dashboard dashboard
 # Tailscale's static binaries; only used when TS_AUTHKEY is set (see scripts/start.sh).
 COPY --from=tailscale /usr/local/bin/tailscaled /usr/local/bin/tailscale /usr/local/bin/
 COPY scripts/start.sh /app/start.sh
+COPY scripts/socks_probe.py /app/socks_probe.py
 ENV NODE_ENV=production
 ENV YTDLP_PO_TOKEN_ENABLED=true
 ENV BGUTIL_SCRIPT_PATH=/root/bgutil-ytdlp-pot-provider/server/build/generate_once.js

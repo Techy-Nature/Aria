@@ -9,7 +9,7 @@ const BASE_ARGS = ["--ignore-config", "--dump-single-json", "--no-playlist", "--
 const DEFAULT_BGUTIL_SCRIPT_PATH = "/root/bgutil-ytdlp-pot-provider/server/build/generate_once.js";
 type Format = { format_id?: unknown; url?: unknown; acodec?: unknown; vcodec?: unknown; abr?: unknown; tbr?: unknown; ext?: unknown; http_headers?: unknown };
 type Output = Format & { formats?: unknown; http_headers?: unknown };
-type FailureKind = "private" | "geo" | "bot" | "provider" | "timeout" | "generic";
+type FailureKind = "private" | "geo" | "bot" | "provider" | "proxy" | "timeout" | "generic";
 
 export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string>; inputCommand?: { command: string; args: string[]; cleanup: () => void } }
 export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string; proxy?: string }
@@ -39,6 +39,8 @@ function score(format: Format) {
 function enabled(value: string | undefined) { return /^(1|true|yes)$/i.test(value ?? ""); }
 function classify(stderr: string): FailureKind {
   const detail = stderr.toLowerCase();
+  // The proxy itself failed (for example the Tailscale exit node is offline).
+  if (/socks server failure|socks5error|proxyerror|unable to connect to proxy|proxy connection|connection refused.*1055/.test(detail)) return "proxy";
   if (/private video|video is private|video unavailable|has been removed|removed by/.test(detail)) return "private";
   if (/not available in your country|geo.?restrict|blocked in your country|region/.test(detail)) return "geo";
   if (/po token provider|pot provider|token provider|failed to generate (an )?integrity token|generateit|provider returned (an )?error|get_pot|bgutil script (failure|failed)|failed to generate.*po.?token|po.?token.*(missing|unavailable|failed|error)/.test(detail)) return "provider";
@@ -123,8 +125,9 @@ export class YtDlpResolver {
     this.poTokenEnabled = options.poTokenEnabled ?? enabled(process.env.YTDLP_PO_TOKEN_ENABLED);
     this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider(this.bgutilScriptPath, options.pythonPath, options.nodePath));
     if (this.available) console.log("[Sources/yt-dlp] available");
-    if (this.proxyArgs.length) console.log("[Sources/yt-dlp] routing YouTube through YTDLP_PROXY");
     else console.warn("[Sources/yt-dlp] unavailable");
+    if (this.proxyArgs.length) console.log("[Sources/yt-dlp] routing YouTube through YTDLP_PROXY");
+    else console.log("[Sources/yt-dlp] YTDLP_PROXY not set; YouTube goes out from this server's own IP");
     if (this.poTokenEnabled && !this.poTokenProviderAvailable) console.warn("[Sources/yt-dlp] PO token provider unavailable; using normal resolver");
   }
   async resolve(input: string): Promise<YtDlpResult> {
@@ -135,7 +138,7 @@ export class YtDlpResolver {
       try { return this.parse(await this.run(url, true), url, true); }
       catch (error) {
         if (!(error instanceof ResolutionFailure)) throw error;
-        if (error.kind === "private" || error.kind === "geo") throw this.publicError(error.kind, true);
+        if (error.kind === "private" || error.kind === "geo" || error.kind === "proxy") throw this.publicError(error.kind, true);
         // Provider, bot-challenge and unclassified failures (for example the mweb
         // client returning no usable formats) all get exactly one standard attempt.
         if (error.kind === "provider") console.warn("[Sources/yt-dlp] PO-token generation failed");
@@ -156,6 +159,7 @@ export class YtDlpResolver {
     if (kind === "private") return new UnplayableSourceError("That YouTube video is unavailable or private.");
     if (kind === "geo") return new UnplayableSourceError("That video is not available from Aria's server region.");
     if (kind === "timeout") return new UnplayableSourceError("YouTube took too long to respond.");
+    if (kind === "proxy") return new UnplayableSourceError("Aria couldn't reach YouTube through your home connection. Check that the exit node device is on, connected to Wi-Fi, and running Tailscale as an exit node.");
     if (kind === "bot") return new UnplayableSourceError(poAttempt ? "YouTube blocked playback from Aria's server. The PO-token provider could not complete this request." : "YouTube blocked playback from Aria's server.");
     if (kind === "provider") return new UnplayableSourceError("YouTube PO-token playback is unavailable because its provider could not start.");
     return new UnplayableSourceError("I couldn't resolve that YouTube audio stream.");
