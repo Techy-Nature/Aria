@@ -10,6 +10,8 @@ export interface GuildSettings { prefix: string; defaultResults: number; queuePa
 export interface PlayerState { guildId: string; voiceChannelId?: string; queue: Track[]; history: Track[]; index: number; paused: boolean; position: number; loop: LoopMode; playbackRevision: number }
 export interface CommandContext {
   guildId: string; channelId: string; userId: string; voiceChannelId?: string;
+  /** Optional slower lookup of the user's voice channel, used when voiceChannelId is missing. */
+  findVoiceChannel?(): Promise<string | undefined>;
   reply(message: string, components?: unknown): Promise<void>;
 }
 export interface PlatformAdapter {
