@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { statSync } from "node:fs";
 import { UnplayableSourceError, ProviderUnavailableError } from "./types.js";
+import { checkSocksRoute, socksProxy, type RouteCheck } from "./routecheck.js";
 
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"]);
 const MAX_OUTPUT = 2 * 1024 * 1024;
@@ -12,7 +13,7 @@ type Output = Format & { formats?: unknown; http_headers?: unknown };
 type FailureKind = "private" | "geo" | "bot" | "provider" | "proxy" | "timeout" | "generic";
 
 export interface YtDlpResult { inputUrl: string; requestHeaders?: Record<string, string>; inputCommand?: { command: string; args: string[]; cleanup: () => void } }
-export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string; proxy?: string }
+export interface YtDlpOptions { path?: string; timeoutMs?: number; available?: boolean; poTokenEnabled?: boolean; poTokenProviderAvailable?: boolean; bgutilScriptPath?: string; pythonPath?: string; nodePath?: string; jsRuntimes?: string; proxy?: string; routeCheck?: (() => Promise<RouteCheck>) | null }
 
 class ResolutionFailure extends Error { constructor(readonly kind: FailureKind) { super(kind); } }
 
@@ -77,7 +78,7 @@ export function proxyArgs(value: string | undefined): string[] {
 }
 /** The final yt-dlp ERROR line, redacted, for operators to diagnose failures. */
 export function errorSummary(stderr: string): string | undefined {
-  const line = stderr.split(/\r?\n/).reverse().find(item => /\bERROR:/.test(item));
+  const line = withoutDebug(stderr).split(/\r?\n/).reverse().find(item => /\bERROR:/.test(item));
   return line ? sanitized(line.replace(/^.*?ERROR:\s*/, "")).slice(0, 300) : undefined;
 }
 export function sanitized(stderr: string) {
@@ -85,6 +86,15 @@ export function sanitized(stderr: string) {
     .replace(/\b(po_?token|pot|token|visitor_?data|authorization|cookie)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
     .replace(/[A-Za-z0-9_-]{80,}/g, "[REDACTED]").trim().slice(-1000);
 }
+/** yt-dlp's --verbose lines ("[debug] ..."), left out when classifying a failure. */
+function withoutDebug(stderr: string) { return stderr.split(/\r?\n/).filter(line => !line.startsWith("[debug]")).join("\n"); }
+/** The last few things yt-dlp printed, redacted: shows which step it was stuck on when it timed out. */
+export function lastSteps(stderr: string, count = 3): string | undefined {
+  const lines = stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(-count).map(line => sanitized(line).slice(0, 200));
+  return lines.length ? lines.join(" | ") : undefined;
+}
+/** How long a passed route check is trusted before checking again. */
+const ROUTE_CHECK_TTL_MS = 60_000;
 function regularFile(path: string): boolean { try { return statSync(path).isFile(); } catch { return false; } }
 export function detectProvider(scriptPath: string, pythonPath = "python3", nodePath = "node"): boolean {
   // These checks are deliberately local-only. Provider discovery with a URL would
@@ -115,12 +125,18 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals) {
 export class YtDlpResolver {
   readonly executable: string; readonly available: boolean; readonly poTokenEnabled: boolean; readonly poTokenProviderAvailable: boolean;
   private readonly timeoutMs: number; private readonly bgutilScriptPath: string; private readonly jsRuntimeArgs: string[]; private readonly proxyArgs: string[]; private readonly children = new Set<ChildProcess>();
+  private readonly routeCheck?: () => Promise<RouteCheck>; private routeOkUntil = 0;
   constructor(options: YtDlpOptions = {}) {
     this.executable = options.path ?? process.env.YTDLP_PATH ?? "yt-dlp"; this.timeoutMs = options.timeoutMs ?? timeoutFrom(process.env.YTDLP_TIMEOUT_MS);
     this.bgutilScriptPath = options.bgutilScriptPath ?? process.env.BGUTIL_SCRIPT_PATH ?? DEFAULT_BGUTIL_SCRIPT_PATH;
     if (!isAbsolute(this.bgutilScriptPath)) throw new Error("BGUTIL_SCRIPT_PATH must be an absolute path");
     this.jsRuntimeArgs = jsRuntimeArgs(options.jsRuntimes ?? process.env.YTDLP_JS_RUNTIMES);
-    this.proxyArgs = proxyArgs(options.proxy ?? process.env.YTDLP_PROXY);
+    const proxy = options.proxy ?? process.env.YTDLP_PROXY;
+    this.proxyArgs = proxyArgs(proxy);
+    // Check the home connection before each extraction (cached for a minute), so an unreachable
+    // exit node is reported in seconds instead of after two 45-second extraction timeouts.
+    const socks = socksProxy(proxy);
+    this.routeCheck = options.routeCheck === null ? undefined : options.routeCheck ?? (socks ? () => checkSocksRoute(socks) : undefined);
     this.available = options.available ?? spawnSync(this.executable, ["--version"], { shell: false, stdio: "ignore", timeout: 3_000 }).status === 0;
     this.poTokenEnabled = options.poTokenEnabled ?? enabled(process.env.YTDLP_PO_TOKEN_ENABLED);
     this.poTokenProviderAvailable = options.poTokenProviderAvailable ?? (this.poTokenEnabled && this.available && detectProvider(this.bgutilScriptPath, options.pythonPath, options.nodePath));
@@ -133,6 +149,7 @@ export class YtDlpResolver {
   async resolve(input: string): Promise<YtDlpResult> {
     const url = validateYtDlpUrl(input);
     if (!this.available) throw new ProviderUnavailableError("YouTube playback is unavailable because yt-dlp is not installed.");
+    await this.checkRoute();
     let poFailed = false;
     if (this.poTokenEnabled && this.poTokenProviderAvailable) {
       try { return this.parse(await this.run(url, true), url, true); }
@@ -155,6 +172,14 @@ export class YtDlpResolver {
       throw this.publicError(error.kind, false);
     }
   }
+  private async checkRoute() {
+    if (!this.routeCheck || Date.now() < this.routeOkUntil) return;
+    const result = await this.routeCheck();
+    if (result.ok) { this.routeOkUntil = Date.now() + ROUTE_CHECK_TTL_MS; console.log(`[Sources/yt-dlp] route to YouTube through YTDLP_PROXY ok (${result.ms} ms)`); return; }
+    this.routeOkUntil = 0;
+    console.warn(`[Sources/yt-dlp] route to YouTube through YTDLP_PROXY failed after ${result.ms} ms: ${result.reason}`);
+    throw this.publicError("proxy", false);
+  }
   private publicError(kind: FailureKind, poAttempt: boolean): UnplayableSourceError {
     if (kind === "private") return new UnplayableSourceError("That YouTube video is unavailable or private.");
     if (kind === "geo") return new UnplayableSourceError("That video is not available from Aria's server region.");
@@ -165,14 +190,15 @@ export class YtDlpResolver {
     return new UnplayableSourceError("I couldn't resolve that YouTube audio stream.");
   }
   private run(url: URL, poToken: boolean): Promise<string> {
-    const args = [...BASE_ARGS, ...this.jsRuntimeArgs, ...this.proxyArgs, ...this.poArgs(poToken), url.toString()];
+    // --verbose makes yt-dlp print each step to stderr, so a timeout can say where it was stuck.
+    const args = [...BASE_ARGS, "--verbose", ...this.jsRuntimeArgs, ...this.proxyArgs, ...this.poArgs(poToken), url.toString()];
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.executable, args, { shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] }); this.children.add(child);
-      let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false;
+      let stdout = "", stderr = "", timedOut = false, outputExceeded = false, settled = false; const started = Date.now();
       const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); this.children.delete(child); error ? reject(error) : resolve(stdout); };
       // Settle immediately on timeout: waiting for "close" can hang forever if a
       // helper process still holds the pipes, which also blocked later commands.
-      const timer = setTimeout(() => { timedOut = true; killTree(child, "SIGTERM"); setTimeout(() => killTree(child, "SIGKILL"), 1_000).unref(); console.warn("[Sources/yt-dlp] extraction timed out"); finish(new ResolutionFailure("timeout")); }, this.timeoutMs);
+      const timer = setTimeout(() => { timedOut = true; killTree(child, "SIGTERM"); setTimeout(() => killTree(child, "SIGKILL"), 1_000).unref(); const steps = lastSteps(stderr); console.warn(`[Sources/yt-dlp] extraction timed out (${poToken ? "PO token" : "standard"}, ${Math.round((Date.now() - started) / 1000)}s)${steps ? `; last output: ${steps}` : "; yt-dlp printed nothing"}`); finish(new ResolutionFailure("timeout")); }, this.timeoutMs);
       child.stdout.on("data", chunk => { if (outputExceeded) return; stdout += chunk; if (Buffer.byteLength(stdout) > MAX_OUTPUT) { outputExceeded = true; stdout = ""; child.stdout.destroy(); killTree(child, "SIGTERM"); setTimeout(() => killTree(child, "SIGKILL"), 1_000).unref(); } });
       child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
       child.once("error", error => finish((error as NodeJS.ErrnoException).code === "ENOENT" ? new ProviderUnavailableError("YouTube playback is unavailable because yt-dlp is not installed.") : error));
@@ -186,7 +212,7 @@ export class YtDlpResolver {
         if (code === 0) return finish();
         // Never emit raw stderr. Only the classified kind plus yt-dlp's final ERROR
         // line, with URLs, tokens and long opaque values redacted, is logged.
-        const kind = classify(stderr); const summary = errorSummary(stderr);
+        const kind = classify(withoutDebug(stderr)); const summary = errorSummary(stderr);
         console.warn(`[Sources/yt-dlp] extraction failed (${poToken ? "PO token" : "standard"}): ${kind}${summary ? ` - ${summary}` : ""}`);
         finish(new ResolutionFailure(kind));
       };
