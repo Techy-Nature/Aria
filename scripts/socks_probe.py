@@ -7,6 +7,7 @@ Tests a connection by IP address (1.1.1.1:443) and by name
 forwards traffic but name lookups through it fail.
 """
 import socket
+import ssl
 import struct
 import sys
 
@@ -30,7 +31,21 @@ def probe(proxy_host, proxy_port, target, port, by_name):
             reply = s.recv(4)
             if len(reply) < 2:
                 return "no reply from proxy"
-            return "ok" if reply[1] == 0 else REPLIES.get(reply[1], f"error {reply[1]}")
+            if reply[1] != 0:
+                return REPLIES.get(reply[1], f"error {reply[1]}")
+            if not by_name:
+                return "ok"
+            # A SOCKS "ok" can come back before anything has crossed the exit node,
+            # so for the name test also finish a real TLS handshake with the site.
+            rest = {1: 6, 4: 18}.get(reply[3]) if len(reply) == 4 else None
+            if rest is None and len(reply) == 4 and reply[3] == 3:
+                rest = s.recv(1)[0] + 2
+            if rest:
+                s.recv(rest)
+            with ssl.create_default_context().wrap_socket(s, server_hostname=target):
+                return "ok"
+    except ssl.SSLError as error:
+        return f"TLS failed ({error.__class__.__name__})"
     except OSError as error:
         return f"failed ({error.__class__.__name__})"
 
@@ -39,7 +54,7 @@ def main():
     host, _, port = sys.argv[1].rpartition(":")
     by_ip = probe(host, int(port), "1.1.1.1", 443, False)
     by_name = probe(host, int(port), "www.youtube.com", 443, True)
-    print(f"[Tailscale] exit node check: internet by IP {by_ip}; youtube.com by name {by_name}", flush=True)
+    print(f"[Tailscale] exit node check: internet by IP {by_ip}; youtube.com by name (with TLS) {by_name}", flush=True)
     if by_ip != "ok":
         print("[Tailscale] the exit node is not forwarding traffic. On that device, turn on 'Run as exit node', "
               "and in the admin console approve it under Edit route settings > Use as exit node.", flush=True)

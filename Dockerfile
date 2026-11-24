@@ -9,7 +9,7 @@ RUN npm run build
 FROM docker.io/tailscale/tailscale:v1.104.4 AS tailscale
 
 FROM node:22-bookworm-slim
-ARG YTDLP_VERSION=2026.10.26
+ARG YTDLP_VERSION=2026.11.23
 ARG BGUTIL_PROVIDER_VERSION=1.3.2
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates git \
     && pip3 install --no-cache-dir --break-system-packages "yt-dlp[default]==${YTDLP_VERSION}" "bgutil-ytdlp-pot-provider==${BGUTIL_PROVIDER_VERSION}" \
